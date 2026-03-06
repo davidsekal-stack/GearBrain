@@ -124,6 +124,10 @@ export default function App() {
         setUpdateProgress(100);
         setUpdatePhase("ready");
       });
+      window.electronAPI.updater.onError((msg) => {
+        setUpdatePhase("idle");
+        setError("Chyba aktualizace: " + msg);
+      });
     })();
   }, []);
 

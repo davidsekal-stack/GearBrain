@@ -73,6 +73,7 @@ function setupAutoUpdater() {
   // Chyba při aktualizaci — tiše logujeme, neblokujeme UI
   autoUpdater.on('error', (err) => {
     console.error('[updater]', err.message)
+    mainWindow?.webContents.send('updater:error', err.message)
   })
 
   // Zkontrolovat aktualizace 3s po startu (aby se nejdřív načetlo UI)
