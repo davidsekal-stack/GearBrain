@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { SYMPTOM_CATEGORIES, COMMON_OBD_CODES } from "../constants/index.js";
+import ObdReader from "./ObdReader.jsx";
 
 const OBD_REGEX = /^[PCBU][0-9A-F]{4}$/;
 
@@ -99,6 +100,12 @@ export default function InputForm({ onSubmit, loading, label = "SPUSTIT DIAGNOST
       {/* Panel: OBD kódy */}
       {tab === "obd" && (
         <div>
+          {/* OBD adaptér — načtení přímo z vozidla */}
+          <ObdReader t={t} onCodesLoaded={(stored, pending) => {
+            const all = [...new Set([...obdCodes, ...stored, ...pending])];
+            setObdCodes(all);
+          }} />
+
           <div style={{ display: "flex", gap: 7, marginBottom: 10 }}>
             <input value={obdInput} onChange={(e) => setObdInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addObdFromInput()}
               placeholder="P0401, P2263..."
@@ -158,6 +165,40 @@ export default function InputForm({ onSubmit, loading, label = "SPUSTIT DIAGNOST
             : `▶ ${label}`}
         </button>
       </div>
+    </div>
+  );
+}
+
+// ── FollowUpPrompt — jednoduchá promptlina pro pokračování diagnostiky ─────────
+// Používá se po první diagnostice (bez tabs na příznaky/OBD)
+export function FollowUpPrompt({ onSubmit, loading, t }) {
+  const [text, setText] = useState("");
+
+  const handleSubmit = () => {
+    const trimmed = text.trim();
+    if (!trimmed || loading) return;
+    onSubmit({ symptoms: [], obdCodes: [], text: trimmed });
+    setText("");
+  };
+
+  return (
+    <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSubmit(); } }}
+        placeholder="Popište nové zjištění nebo doplňte informace... (Enter = odeslat, Shift+Enter = nový řádek)"
+        rows={2}
+        style={{ flex: 1, background: t.bgInput, border: `1px solid ${t.borderInput}`, color: t.text, padding: "10px 12px", fontSize: "0.88rem", lineHeight: 1.6, fontFamily: "'IBM Plex Mono',monospace", resize: "none", outline: "none", borderRadius: 2 }}
+      />
+      <button
+        disabled={!text.trim() || loading}
+        onClick={handleSubmit}
+        style={{ background: text.trim() ? t.accent : t.border, color: text.trim() ? "#fff" : t.textFaint, border: "none", cursor: text.trim() && !loading ? "pointer" : "not-allowed", padding: "10px 20px", fontSize: "0.82rem", fontFamily: "inherit", fontWeight: 700, borderRadius: 2, transition: "all 0.2s", whiteSpace: "nowrap", flexShrink: 0 }}>
+        {loading
+          ? <span style={{ animation: "pulse 1.5s ease infinite", display: "inline-block" }}>...</span>
+          : "▶ Odeslat"}
+      </button>
     </div>
   );
 }

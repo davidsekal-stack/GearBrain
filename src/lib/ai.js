@@ -1,5 +1,64 @@
 import { extractSignals } from "./rag.js";
 
+// ── Limity ────────────────────────────────────────────────────────────────────
+
+export const CASE_TOKEN_LIMIT = 40_000
+
+/**
+ * Odhadne počet tokenů v textu (přibližně — 1 token ≈ 4 znaky v češtině/angličtině).
+ * Používáme jen pro zobrazení v UI, přesné hodnoty čteme z API odpovědi.
+ */
+export function estimateTokens(text) {
+  return Math.ceil((text ?? "").length / 4)
+}
+
+// ── Off-topic detekce ─────────────────────────────────────────────────────────
+
+// Technické zkratky — jejich přítomnost silně indikuje diagnostický kontext
+const TECH_ABBREVIATIONS = /(dpf|egr|adblue|ecu|ecm|tcm|abs|esp|eps|can|lin|obd|dtc|mil|vin|rpm|tdci|ecoblue|ecoboost|scr|nox|def|urea|vgt|egts|maf|map|iac|tps|ckp|cmp|evap|purge|swirl|pid)/i
+
+// OBD kód ve formátu P0401, C1234, B0001, U0100
+const OBD_CODE_PATTERN = /[PCBU][0-9A-F]{4}/i
+
+// Čísla s technickým kontextem — nájezd, teplota, tlak, RPM, napětí
+const TECHNICAL_NUMBER = /d+s*(km|bar|kpa|rpm|psi|mbar|nm|ms|mv|mg)|d+°[cf]/i
+
+/**
+ * Zkontroluje zda text mechanika pravděpodobně patří k diagnostice vozidla.
+ *
+ * Blokuje pouze dlouhé texty (>80 znaků) bez jakéhokoliv technického signálu.
+ * Krátké texty a doplňující odpovědi ("znovu se to stalo") vždy projdou.
+ *
+ * Signály relevance (stačí jeden):
+ *   - OBD kód (P0401, C1234...)
+ *   - Technická zkratka (DPF, EGR, ECU, ABS...)
+ *   - Číslo s jednotkou (185000 km, 92°C, 2.4 bar...)
+ *   - Krátký text ≤80 znaků (doplňující odpověď)
+ *
+ * @param {string} text
+ * @returns {{ ok: boolean, reason: string|null }}
+ */
+export function checkTopicRelevance(text) {
+  const trimmed = (text ?? "").trim()
+
+  // Krátké texty vždy projdou — jsou to doplňující odpovědi v kontextu případu
+  if (trimmed.length <= 80) return { ok: true, reason: null }
+
+  // Delší text musí obsahovat alespoň jeden technický signál
+  const hasObd        = OBD_CODE_PATTERN.test(trimmed)
+  const hasTechAbbr   = TECH_ABBREVIATIONS.test(trimmed)
+  const hasTechNumber = TECHNICAL_NUMBER.test(trimmed)
+
+  if (hasObd || hasTechAbbr || hasTechNumber) {
+    return { ok: true, reason: null }
+  }
+
+  return {
+    ok: false,
+    reason: "Popis neobsahuje žádný technický údaj (OBD kód, zkratku jako DPF/EGR/ABS, nebo měřenou hodnotu). Popište technický problém nebo příznaky závady.",
+  }
+}
+
 /**
  * Pokusí se opravit zkrácený nebo mírně poškozený JSON z API odpovědi.
  * 1) Zkusí přímý JSON.parse
@@ -32,7 +91,7 @@ export function smartRepair(raw) {
     try {
       return JSON.parse(
         str.slice(0, lastFaultEnd + 1) +
-        '\n],\n"doporučené_testy":[],\n"varování":null,\n"další_info":"Výsledek zkrácen."\n}'
+        '\n],\n"doporučené_testy":[],\n"varování":null,\n"další_info":null\n}'
       );
     } catch (_) {}
   }
@@ -42,9 +101,8 @@ export function smartRepair(raw) {
 
 /**
  * Sestaví system prompt pro Claude.
- * Pokud existují podobné uzavřené případy, jsou vloženy jako RAG blok
- * s explicitní instrukcí o jejich prioritě nad obecnou diagnostikou.
- * @param {Array} similarCases - výsledek findSimilar()
+ * Pokud existují podobné uzavřené případy, jsou vloženy jako RAG blok.
+ * @param {Array} similarCases - výsledek findSimilarInCloud()
  * @returns {string}
  */
 export function buildSystemPrompt(similarCases) {
@@ -55,7 +113,7 @@ export function buildSystemPrompt(similarCases) {
 Když dostaneš příznaky, OBD kódy nebo popis závady, vrať POUZE validní JSON (bez textu před/za JSON):
 {"shrnutí":"...","závady":[{"název":"...","pravděpodobnost":85,"popis":"...","příznaky_shoda":[],"obd_kódy":[],"díly":[],"postup":"...","naléhavost":"vysoká","poznámka":"..."}],"doporučené_testy":[],"varování":null,"další_info":null}
 
-Pravidla: Když nevíš, přiznej to. 1–4 závady seřazené dle pravděpodobnosti. Naléhavost: nízká/střední/vysoká/kritická. Zohledni EU specifika (AdBlue, DPF Euro6). VRAŤ POUZE JSON.`;
+Pravidla: Odpovídáš VÝHRADNĚ na otázky týkající se diagnostiky a opravy vozidel. Pokud dostaneš dotaz nesouvisející s diagnostikou vozidla, vrať JSON se závadou název "Nesouvisející dotaz" a pravděpodobností 0 a popisem "Tento systém slouží pouze pro diagnostiku vozidel Ford Transit." Jinak: Když nevíš, přiznej to. 1–4 závady seřazené dle pravděpodobnosti. Naléhavost: nízká/střední/vysoká/kritická. Zohledni EU specifika (AdBlue, DPF Euro6). VRAŤ POUZE JSON.`;
 }
 
 function buildRagBlock(cases) {
@@ -70,10 +128,12 @@ function buildRagBlock(cases) {
     );
   });
 
+  // FIX #4: Místo "MUSÍŠ" dáváme AI prostor pro vlastní úsudek.
+  // Silná direktiva přepisovala diagnózu i při jen částečné shodě.
   return `
 
-OVĚŘENÉ OPRAVY Z DATABÁZE SERVISU (nejvyšší priorita):
+OVĚŘENÉ OPRAVY Z DATABÁZE SERVISU:
 ${entries.join("\n\n")}
 
-INSTRUKCE K DATABÁZI: Tyto záznamy jsou reálné opravy provedené na stejném nebo podobném vozidle. Při shodě OBD kódů nebo příznaků MUSÍŠ toto řešení uvést jako první závadu s nejvyšší pravděpodobností. Ověřené řešení z databáze má přednost před obecnou diagnostikou.`;
+INSTRUKCE K DATABÁZI: Tyto záznamy jsou reálné opravy provedené na stejném nebo podobném vozidle. Pokud se OBD kódy nebo příznaky shodují, silně zvažuj tato řešení jako primární závadu — mají přednost před obecnou diagnostikou. Pokud shoda není jednoznačná, uveď je jako možnou variantu a vysvětli rozdíly.`;
 }

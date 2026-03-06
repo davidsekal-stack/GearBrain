@@ -82,7 +82,8 @@ function FaultCard({ fault: f, isPrimary, t }) {
 // ── Hlavní komponenta ─────────────────────────────────────────────────────────
 
 export default function DiagCard({ result, ragMatches = [], t }) {
-  const hasMeta = result.doporučené_testy?.length > 0 || result.varování || result.další_info;
+  const dalsiInfo = result.další_info === "Výsledek zkrácen." ? null : result.další_info;
+  const hasMeta = result.doporučené_testy?.length > 0 || result.varování || dalsiInfo;
 
   return (
     <div className="fade-in">
@@ -123,9 +124,9 @@ export default function DiagCard({ result, ragMatches = [], t }) {
                 ⚠ {result.varování}
               </div>
             )}
-            {result.další_info && (
+            {dalsiInfo && (
               <div style={{ fontSize: "0.76rem", color: t.obdText, background: t.obdBg, padding: "6px 8px", borderLeft: `2px solid ${t.borderAccent}`, borderRadius: 2 }}>
-                ℹ {result.další_info}
+                ℹ {dalsiInfo}
               </div>
             )}
           </div>
