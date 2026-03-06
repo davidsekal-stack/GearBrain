@@ -103,6 +103,12 @@ export default function App() {
       if (saved) { try { setCases(JSON.parse(saved)); } catch (_) {} }
       const cfg = await window.electronAPI.cloud.configGet();
       if (cfg.installationId) setInstallationId(cfg.installationId);
+
+      // Cloud je nakonfigurovaný → zobrazíme ok ihned
+      // (testConnection volá REST endpoint který má zakázaný anon SELECT)
+      // Reálný stav se ověří při první diagnostice přes Edge Function
+      if (cfg.enabled) setCloudStatus('ok');
+
       setAppReady(true);
 
       // Posloucháme události auto-updateru
