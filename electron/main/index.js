@@ -221,11 +221,11 @@ ipcMain.handle('cloud:push', async (_e, kase) => {
 })
 
 
-/** Stáhne celou cloudovou databázi pro lokální RAG cache (jednorázově při startu) */
-ipcMain.handle('cloud:fetch-all', async (_e, { limit = 10000 } = {}) => {
+/** Zavolá Edge Function search-cases pro RAG (per-query, žádná lokální cache) */
+ipcMain.handle('cloud:search-cases', async (_e, { input, installationId }) => {
   const cfg = getCloudConfig()
-  if (!cfg) return { cases: [], count: 0, error: 'cloud není nakonfigurovaný', fetchedAt: null }
-  return cloud.fetchAll(cfg.url, cfg.key, limit)
+  if (!cfg) return { cases: [], error: null }
+  return cloud.searchCases(cfg.url, cfg.key, input, installationId)
 })
 
 // ── IPC: OBD / ELM327 ────────────────────────────────────────────────────────

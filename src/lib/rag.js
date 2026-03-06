@@ -1,15 +1,18 @@
 /**
  * RAG (Retrieval-Augmented Generation) modul
  *
- * Skórovací váhy:
+ * computeSimilarity() — skórovací logika, sdílena s Edge Function search-cases
+ * extractSignals()    — pomocná funkce pro sestavení RAG bloku v system promptu
+ *
+ * Scoring algoritmus (shodný s supabase/functions/search-cases/index.ts):
  *   +2   shoda značky vozidla
  *   +3   shoda modelu vozidla
  *   +4   shoda OBD kódu  (nejsilnější diagnostický signál)
  *   +1.5 shoda příznaku
- *   +0.3 shoda klíčového slova z volného textu (>4 znaky), max +2 celkem z textu
+ *   +0.3 shoda klíčového slova z volného textu (>4 znaky), max +2 celkem
  *
  * Prahy relevance:
- *   OWN_THRESHOLD   = 8  — záznamy z této instalace (naše vlastní případy)
+ *   OWN_THRESHOLD   = 8  — záznamy z této instalace
  *   OTHER_THRESHOLD = 10 — záznamy od ostatních servisů
  */
 
@@ -50,40 +53,13 @@ export function computeSimilarity(closed, input) {
   let textScore = 0
   for (const word of (input.text ?? '').toLowerCase().split(/\s+/).filter((w) => w.length > 4)) {
     if (allText.includes(word)) {
-      textScore += 0.3
+      textScore = Math.min(textScore + 0.3, MAX_TEXT_SCORE)
       if (textScore >= MAX_TEXT_SCORE) break
     }
   }
   score += textScore
 
   return score
-}
-
-/**
- * Prohledá cloudovou databázi (která obsahuje i naše vlastní záznamy).
- * Vlastní záznamy (podle installationId) mají nižší práh než cizí.
- *
- * @param {Array}  cloudDb        - celá cloudová cache (stažená při startu)
- * @param {Object} input          - { vehicle, symptoms, obdCodes, text }
- * @param {string} installationId - UUID této instalace (pro rozlišení vlastních záznamů)
- * @returns {Array}               - max 5 nejrelevantnějších případů
- */
-export function findSimilarInCloud(cloudDb, input, installationId) {
-  return cloudDb
-    .map((c) => {
-      const score     = computeSimilarity(c, input)
-      const isOwn     = c.installationId === installationId
-      const threshold = isOwn ? OWN_THRESHOLD : OTHER_THRESHOLD
-      return { c, score, isOwn, passes: score >= threshold }
-    })
-    .filter((x) => x.passes)
-    .sort((a, b) =>
-      b.score - a.score ||
-      // Při stejném skóre mají přednost vlastní záznamy
-      (a.isOwn && !b.isOwn ? -1 : !a.isOwn && b.isOwn ? 1 : 0)
-    )
-    .slice(0, 5)
-    .map((x) => x.c)
 }
 
 /**

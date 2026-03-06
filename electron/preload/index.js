@@ -24,7 +24,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     set: (model) => ipcRenderer.invoke('model:set', model),
   },
 
-  // Cloud databáze (Supabase)
+  // Auto-updater
   updater: {
     onAvailable:  (cb) => ipcRenderer.on('updater:available',  (_e, info)     => cb(info)),
     onProgress:   (cb) => ipcRenderer.on('updater:progress',   (_e, progress) => cb(progress)),
@@ -33,13 +33,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     install:  () => ipcRenderer.invoke('updater:install'),
     check:    () => ipcRenderer.invoke('updater:check'),
   },
+  // Cloud databáze (Supabase)
   cloud: {
     configGet:    ()              => ipcRenderer.invoke('cloud:config-get'),
     configSet:    (url, anonKey)  => ipcRenderer.invoke('cloud:config-set', { url, anonKey }),
     configDelete: ()              => ipcRenderer.invoke('cloud:config-delete'),
     test:         ()              => ipcRenderer.invoke('cloud:test'),
     push:         (kase)          => ipcRenderer.invoke('cloud:push', kase),
-    fetchAll:     (opts)          => ipcRenderer.invoke('cloud:fetch-all', opts),
+    searchCases:  (input, installationId) => ipcRenderer.invoke('cloud:search-cases', { input, installationId }),
   },
 
   // OBD-II / ELM327

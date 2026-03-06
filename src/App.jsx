@@ -3,7 +3,6 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { DARK, LIGHT }                      from "./theme.js";
 import { VEHICLE_MODELS, EMPTY_VEHICLE }    from "./constants/index.js";
 import { uid, fmtDate, fmtMileage }         from "./lib/utils.js";
-import { findSimilarInCloud }                from "./lib/rag.js";
 import { smartRepair, buildSystemPrompt, checkTopicRelevance, CASE_TOKEN_LIMIT } from "./lib/ai.js";
 import DiagCard                             from "./components/DiagCard.jsx";
 import InputForm, { FollowUpPrompt }        from "./components/InputForm.jsx";
@@ -77,13 +76,8 @@ export default function App() {
   const [deleteId,   setDeleteId]   = useState(null);
   const [newVehicle, setNewVehicle] = useState(EMPTY_VEHICLE);
 
-  // ── Cloud DB cache — načtena jednou při startu, prohledávána lokálně ─────────
-  const [cloudDb,         setCloudDb]         = useState([]);       // pole případů
-  const [cloudDbCount,    setCloudDbCount]     = useState(0);        // počet záznamů
-  const [cloudDbStatus,   setCloudDbStatus]    = useState("idle");   // "idle"|"loading"|"ok"|"error"
-  const [cloudDbFetched,  setCloudDbFetched]   = useState(null);     // ISO timestamp posledního načtení
-  const [cloudLimitHit,   setCloudLimitHit]    = useState(false);       // varování: dosažen limit stahování
   const [installationId,  setInstallationId]   = useState("");         // UUID této instalace
+  const [cloudStatus,     setCloudStatus]      = useState("idle");   // "idle"|"ok"|"error" — stav posledního RAG dotazu
 
   // ── Auto-updater ──────────────────────────────────────────────────────────────
   const [updateInfo,     setUpdateInfo]     = useState(null);   // { version, releaseDate }
@@ -99,25 +93,6 @@ export default function App() {
   const diagCount   = activeCase?.messages.filter((m) => m.type === "diagnosis").length ?? 0;
 
   // ── Init ────────────────────────────────────────────────────────────────────
-  // Načtení cloudové DB — spustíme po init, neblokuje start aplikace
-  const fetchCloudDb = useCallback(async () => {
-    setCloudDbStatus("loading");
-    try {
-      const { cases: fetched, count, limitReached, error } = await window.electronAPI.cloud.fetchAll();
-      if (error) {
-        setCloudDbStatus("error");
-        return;
-      }
-      setCloudDb(fetched);
-      setCloudDbCount(count);
-      setCloudDbFetched(new Date().toISOString());
-      setCloudLimitHit(!!limitReached);
-      setCloudDbStatus("ok");
-    } catch (_) {
-      setCloudDbStatus("error");
-    }
-  }, []);
-
   useEffect(() => {
     (async () => {
       const [apiKey, saved] = await Promise.all([
@@ -145,11 +120,6 @@ export default function App() {
       });
     })();
   }, []);
-
-  // Načtení cloudu po inicializaci (neblokující — spustí se na pozadí)
-  useEffect(() => {
-    if (appReady) fetchCloudDb();
-  }, [appReady, fetchCloudDb]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -200,9 +170,17 @@ export default function App() {
 
     const ragInput = { vehicle, symptoms: allSymptoms, obdCodes: allObdCodes, text: allTexts.join(" ") };
 
-    // RAG — prohledáváme cloudovou databázi (stažená při startu, žádná síť)
-    // Vlastní záznamy (installationId) mají nižší práh než cizí
-    const similar = findSimilarInCloud(cloudDb, ragInput, installationId);
+    // RAG — Edge Function provede scoring na serveru, vrátí max 5 výsledků
+    // Žádná lokální cache — databáze nikdy neopustí server
+    let similar = [];
+    try {
+      const { cases } = await window.electronAPI.cloud.searchCases(ragInput, installationId);
+      similar = cases ?? [];
+      setCloudStatus("ok");
+    } catch (_) {
+      setCloudStatus("error");
+      // Tiše pokračujeme bez RAG
+    }
 
     const userPrompt = [
       (vehicle.brand || vehicle.model) && `Vozidlo: ${[vehicle.brand, vehicle.model].filter(Boolean).join(" ")}`,
@@ -263,7 +241,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [updateCase, cloudDb, installationId]);
+  }, [updateCase, installationId]);
 
   const handleNewCase = useCallback((inputData) => {
     const id = createCase(newVehicle);
@@ -339,8 +317,8 @@ export default function App() {
             {cases.length} případů
           </span>
           <span style={{ color: t.border }}>·</span>
-          <span style={{ fontSize: "0.75rem", color: cloudDbStatus === "ok" ? t.doneStatusColor : t.textFaint }}>
-            {cloudDbStatus === "ok" ? `${cloudDbCount} v cloudu` : cloudDbStatus === "loading" ? "načítám..." : "cloud offline"}
+          <span style={{ fontSize: "0.75rem", color: cloudStatus === "ok" ? t.doneStatusColor : t.textFaint }}>
+            {cloudStatus === "ok" ? "cloud ✓" : cloudStatus === "error" ? "cloud offline" : "cloud —"}
           </span>
           <span style={{ color: t.border, margin: "0 4px" }}>|</span>
           <button onClick={() => setDarkMode((d) => !d)}
@@ -458,29 +436,11 @@ export default function App() {
               Lokální: {closedCount > 0 ? `${closedCount} uzavřených` : "prázdná"}
             </div>
 
-            {/* Cloud databáze — status + tlačítko refresh */}
-            <div style={{ padding: "7px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
-              <div style={{ fontSize: "0.67rem", color: cloudDbStatus === "ok" ? t.doneStatusColor : cloudDbStatus === "error" ? "#dc2626" : t.textVeryFaint, display: "flex", alignItems: "center", gap: 5 }}>
-                {cloudDbStatus === "loading" && <span style={{ animation: "pulse 1s ease infinite" }}>◌</span>}
-                {cloudDbStatus === "ok"      && <span>●</span>}
-                {cloudDbStatus === "error"   && <span>✕</span>}
-                {cloudDbStatus === "idle"    && <span>○</span>}
-                <span>
-                  {cloudDbStatus === "loading" && "Načítám cloud..."}
-                  {cloudDbStatus === "ok"      && `Cloud: ${cloudDbCount} záznamů${cloudLimitHit ? " ⚠" : ""}`}
-                  {cloudDbStatus === "error"   && "Cloud nedostupný"}
-                  {cloudDbStatus === "idle"    && "Cloud: nepřipojeno"}
-                </span>
-              </div>
-              {cloudDbStatus !== "idle" && (
-                <button
-                  onClick={fetchCloudDb}
-                  disabled={cloudDbStatus === "loading"}
-                  title={cloudLimitHit ? "⚠ Databáze má více než 10 000 záznamů — zobrazena pouze nejnovější část" : cloudDbFetched ? `Poslední aktualizace: ${fmtDate(cloudDbFetched)}` : "Aktualizovat cloud databázi"}
-                  style={{ background: "none", border: `1px solid ${t.border}`, color: cloudDbStatus === "loading" ? t.textVeryFaint : t.textFaint, padding: "2px 7px", fontSize: "0.65rem", cursor: cloudDbStatus === "loading" ? "not-allowed" : "pointer", fontFamily: "inherit", borderRadius: 2, flexShrink: 0, transition: "all 0.15s" }}>
-                  {cloudDbStatus === "loading" ? "..." : "↺"}
-                </button>
-              )}
+            {/* Cloud databáze — stav posledního RAG dotazu */}
+            <div style={{ padding: "7px 12px", fontSize: "0.67rem", color: cloudStatus === "ok" ? t.doneStatusColor : cloudStatus === "error" ? "#dc2626" : t.textVeryFaint, display: "flex", alignItems: "center", gap: 5 }}>
+              {cloudStatus === "ok"    && <><span>●</span><span>Cloud RAG aktivní</span></>}
+              {cloudStatus === "error" && <><span>✕</span><span>Cloud nedostupný</span></>}
+              {cloudStatus === "idle"  && <><span>○</span><span>Cloud: nepřipojeno</span></>}
             </div>
           </div>
         </aside>
@@ -623,12 +583,9 @@ export default function App() {
 
                     // ── AI diagnostika — bublina vlevo ──
                     if (msg.type === "diagnosis") {
-                      // FIX #2: Hledáme v lokálních cases I v cloudDb — cloudové záznamy mají Supabase UUID
-      const matchIds    = msg.ragMatchIds ?? [];
-      const ragSessions = [
-        ...cases.filter((c) => matchIds.includes(c.id)),
-        ...cloudDb.filter((c) => matchIds.includes(c.id)),
-      ];
+                      // RAG shody — jen lokální cases (cloudové záznamy se již neukládají lokálně)
+                    const matchIds    = msg.ragMatchIds ?? [];
+                    const ragSessions = cases.filter((c) => matchIds.includes(c.id));
                       return (
                         <div key={msg.id} style={{ display: "flex", justifyContent: "flex-start" }}>
                           <div style={{ maxWidth: "92%" }}>
@@ -702,7 +659,7 @@ export default function App() {
 
       {/* ── Nastavení ── */}
       {showSettings && (
-        <SettingsPanel t={t} onClose={() => setShowSettings(false)} onKeyDeleted={() => { setShowSettings(false); setHasApiKey(false); }} onCloudConfigSaved={fetchCloudDb} />
+        <SettingsPanel t={t} onClose={() => setShowSettings(false)} onKeyDeleted={() => { setShowSettings(false); setHasApiKey(false); }} />
       )}
 
       {/* ── MODAL: Uzavřít případ ── */}

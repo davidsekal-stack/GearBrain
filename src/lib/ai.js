@@ -4,14 +4,6 @@ import { extractSignals } from "./rag.js";
 
 export const CASE_TOKEN_LIMIT = 40_000
 
-/**
- * Odhadne počet tokenů v textu (přibližně — 1 token ≈ 4 znaky v češtině/angličtině).
- * Používáme jen pro zobrazení v UI, přesné hodnoty čteme z API odpovědi.
- */
-export function estimateTokens(text) {
-  return Math.ceil((text ?? "").length / 4)
-}
-
 // ── Off-topic detekce ─────────────────────────────────────────────────────────
 
 // Technické zkratky — jejich přítomnost silně indikuje diagnostický kontext
@@ -21,7 +13,7 @@ const TECH_ABBREVIATIONS = /(dpf|egr|adblue|ecu|ecm|tcm|abs|esp|eps|can|lin|obd
 const OBD_CODE_PATTERN = /[PCBU][0-9A-F]{4}/i
 
 // Čísla s technickým kontextem — nájezd, teplota, tlak, RPM, napětí
-const TECHNICAL_NUMBER = /d+s*(km|bar|kpa|rpm|psi|mbar|nm|ms|mv|mg)|d+°[cf]/i
+const TECHNICAL_NUMBER = /\d+\s*(km|bar|kpa|rpm|psi|mbar|nm|ms|mv|mg)|\d+°[cf]/i
 
 /**
  * Zkontroluje zda text mechanika pravděpodobně patří k diagnostice vozidla.
@@ -102,7 +94,7 @@ export function smartRepair(raw) {
 /**
  * Sestaví system prompt pro Claude.
  * Pokud existují podobné uzavřené případy, jsou vloženy jako RAG blok.
- * @param {Array} similarCases - výsledek findSimilarInCloud()
+ * @param {Array} similarCases - výsledek searchCases() z Edge Function
  * @returns {string}
  */
 export function buildSystemPrompt(similarCases) {

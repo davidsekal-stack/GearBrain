@@ -1,13 +1,16 @@
 /**
  * Unit testy pro src/lib/rag.js
  * Spuštění: node tests/rag.test.js
+ *
+ * Pozn.: findSimilarInCloud() byla odstraněna — scoring nyní probíhá
+ * na serveru v Edge Function (supabase/functions/search-cases/index.ts).
+ * Testy pokrývají computeSimilarity() a extractSignals() které zůstávají.
  */
 
 const assert = require('assert')
 
-// ESM modul načteme přes dynamic import
 async function run() {
-  const { computeSimilarity, findSimilarInCloud } = await import('../src/lib/rag.js')
+  const { computeSimilarity, extractSignals } = await import('../src/lib/rag.js')
 
   let passed = 0, failed = 0
 
@@ -16,19 +19,13 @@ async function run() {
     catch (e) { console.error(`  ✗ ${name}\n    ${e.message}`); failed++ }
   }
 
-  function eq(a, b, msg) {
-    assert.strictEqual(JSON.stringify(a), JSON.stringify(b), msg || `got ${JSON.stringify(a)}, expected ${JSON.stringify(b)}`)
-  }
+  const OWN_ID = 'install-uuid-own'
 
-  const OWN_ID   = 'install-uuid-own'
-  const OTHER_ID = 'install-uuid-other'
-
-  const mkCase = (installationId, model, obdCodes, symptoms, text = '') => ({
+  const mkCase = (model, obdCodes, symptoms, text = '') => ({
     id:             Math.random().toString(36).slice(2),
     status:         'uzavřený',
     resolution:     'Opraveno.',
-    fromCloud:      true,
-    installationId,
+    installationId: OWN_ID,
     vehicle:        { brand: 'Ford', model },
     messages: [{ type: 'input', symptoms, obdCodes, text }],
   })
@@ -43,119 +40,80 @@ async function run() {
   // ── computeSimilarity ──────────────────────────────────────────────────────
   console.log('\n── computeSimilarity ────────────────────────────────────────────')
 
-  test('Plná shoda (model+OBD+2 příznaky) = brand+model+OBD+2 příznaky = 2+3+4+3 = 12', () => {
-    const c = mkCase(OWN_ID, 'Transit 2.2 TDCi (2006–2014)', ['P0401'], ['Ztráta výkonu', 'Černý kouř'])
+  test('Plná shoda (brand+model+OBD+2 příznaky) = 2+3+4+3 = 12', () => {
+    const c = mkCase('Transit 2.2 TDCi (2006–2014)', ['P0401'], ['Ztráta výkonu', 'Černý kouř'])
     assert.strictEqual(computeSimilarity(c, INPUT), 12)
   })
 
-  test('Jen OBD kód = brand+OBD = 2+4 = 6', () => {
-    const c = mkCase(OWN_ID, '', ['P0401'], [])
+  test('Jen OBD kód (brand+OBD) = 2+4 = 6', () => {
+    const c = mkCase('', ['P0401'], [])
     assert.strictEqual(computeSimilarity(c, INPUT), 6)
   })
 
-  test('Jen model = 5 (brand+model)', () => {
-    const c = mkCase(OWN_ID, 'Transit 2.2 TDCi (2006–2014)', [], [])
-    assert.strictEqual(computeSimilarity(c, INPUT), 5) // brand(2) + model(3)
+  test('Jen model (brand+model) = 2+3 = 5', () => {
+    const c = mkCase('Transit 2.2 TDCi (2006–2014)', [], [])
+    assert.strictEqual(computeSimilarity(c, INPUT), 5)
   })
 
-  test('Jen příznak = brand+příznak = 2+1.5 = 3.5', () => {
-    const c = mkCase(OWN_ID, '', [], ['Ztráta výkonu'])
+  test('Jen příznak (brand+příznak) = 2+1.5 = 3.5', () => {
+    const c = mkCase('', [], ['Ztráta výkonu'])
     assert.strictEqual(computeSimilarity(c, INPUT), 3.5)
   })
 
-  test('Žádná shoda = brand match = 2 (jiný model, OBD, příznaky)', () => {
-    const c = mkCase(OWN_ID, 'Sprinter 316 CDI', ['P0087'], ['Přehřívání'])
+  test('Žádná shoda (jiný model+OBD+příznaky) = brand = 2', () => {
+    const c = mkCase('Sprinter 316 CDI', ['P0087'], ['Přehřívání'])
     assert.strictEqual(computeSimilarity(c, INPUT), 2)
   })
 
-  test('Dva OBD kódy = brand+2×OBD = 2+4+4 = 10', () => {
+  test('Dva OBD kódy (brand+2×OBD) = 2+4+4 = 10', () => {
     const input2 = { ...INPUT, obdCodes: ['P0401', 'P0403'] }
-    const c = mkCase(OWN_ID, '', ['P0401', 'P0403'], [])
+    const c = mkCase('', ['P0401', 'P0403'], [])
     assert.strictEqual(computeSimilarity(c, input2), 10)
   })
 
-  // ── findSimilarInCloud — vlastní záznamy (práh 8) ─────────────────────────
-  console.log('\n── findSimilarInCloud — vlastní záznamy (práh OWN=8) ────────────')
-
-  test('Vlastní: OBD+model+příznak (10) projde', () => {
-    const c = mkCase(OWN_ID, 'Transit 2.2 TDCi (2006–2014)', ['P0401'], ['Ztráta výkonu'])
-    const result = findSimilarInCloud([c], INPUT, OWN_ID)
-    eq(result.length, 1)
+  test('Text skóre je omezeno na max 2 (i při 30+ shodách)', () => {
+    const words = Array.from({ length: 30 }, (_, i) => `slovo${i}`)
+    const input3 = { ...INPUT, text: words.join(' ') }
+    const c = mkCase('', [], [], words.join(' '))
+    const score = computeSimilarity(c, input3)
+    // brand(2) + textScore(max 2) = 4
+    assert(score <= 4, `Skóre ${score} překračuje maximum brand(2)+text(2)=4`)
   })
 
-  test('Vlastní: jen OBD kód (4) neprojde prahem 8', () => {
-    const c = mkCase(OWN_ID, '', ['P0401'], [])
-    const result = findSimilarInCloud([c], INPUT, OWN_ID)
-    eq(result.length, 0)
+  // ── extractSignals ─────────────────────────────────────────────────────────
+  console.log('\n── extractSignals ───────────────────────────────────────────────')
+
+  test('Extrahuje unikátní příznaky a OBD kódy z více vstupních zpráv', () => {
+    const kase = {
+      messages: [
+        { type: 'input',     symptoms: ['Ztráta výkonu', 'Kouř'], obdCodes: ['P0401'] },
+        { type: 'input',     symptoms: ['Ztráta výkonu', 'Hluk'], obdCodes: ['P0401', 'P0403'] },
+        { type: 'diagnosis', symptoms: [],                          obdCodes: [] },
+      ]
+    }
+    const { symptoms, obdCodes } = extractSignals(kase)
+    assert.strictEqual(symptoms.length, 3, 'Má být 3 unikátní příznaky')
+    assert.strictEqual(obdCodes.length, 2, 'Má být 2 unikátní OBD kódy')
+    assert(symptoms.includes('Ztráta výkonu'))
+    assert(obdCodes.includes('P0401'))
+    assert(obdCodes.includes('P0403'))
   })
 
-  test('Vlastní: dva OBD kódy (8) projde přesně na prahu', () => {
-    const input2 = { ...INPUT, obdCodes: ['P0401', 'P0403'] }
-    const c = mkCase(OWN_ID, '', ['P0401', 'P0403'], [])
-    const result = findSimilarInCloud([c], input2, OWN_ID)
-    eq(result.length, 1)
+  test('Diagnosis zprávy jsou ignorovány', () => {
+    const kase = {
+      messages: [
+        { type: 'diagnosis', symptoms: ['Ignoruj mě'], obdCodes: ['P9999'] },
+      ]
+    }
+    const { symptoms, obdCodes } = extractSignals(kase)
+    assert.strictEqual(symptoms.length, 0)
+    assert.strictEqual(obdCodes.length, 0)
   })
 
-  test('Vlastní: model+příznak (3+1.5=4.5) neprojde prahem 8', () => {
-    const c = mkCase(OWN_ID, 'Transit 2.2 TDCi (2006–2014)', [], ['Ztráta výkonu'])
-    const result = findSimilarInCloud([c], INPUT, OWN_ID)
-    eq(result.length, 0)
-  })
-
-  // ── findSimilarInCloud — cizí záznamy (práh 10) ───────────────────────────
-  console.log('\n── findSimilarInCloud — cizí záznamy (práh OTHER=10) ────────────')
-
-  test('Cizí: OBD+model+příznak (10) projde přesně na prahu', () => {
-    const c = mkCase(OTHER_ID, 'Transit 2.2 TDCi (2006–2014)', ['P0401'], ['Ztráta výkonu'])
-    const result = findSimilarInCloud([c], INPUT, OWN_ID)
-    eq(result.length, 1)
-  })
-
-  test('Cizí: OBD+model (7) neprojde prahem 10', () => {
-    const c = mkCase(OTHER_ID, 'Transit 2.2 TDCi (2006–2014)', ['P0401'], [])
-    const result = findSimilarInCloud([c], INPUT, OWN_ID)
-    eq(result.length, 0)
-  })
-
-  test('Cizí: jen OBD kód (4) neprojde prahem 10', () => {
-    const c = mkCase(OTHER_ID, '', ['P0401'], [])
-    const result = findSimilarInCloud([c], INPUT, OWN_ID)
-    eq(result.length, 0)
-  })
-
-  test('Cizí: OBD+model+2 příznaky (11.5) projde', () => {
-    const c = mkCase(OTHER_ID, 'Transit 2.2 TDCi (2006–2014)', ['P0401'], ['Ztráta výkonu', 'Černý kouř'])
-    const result = findSimilarInCloud([c], INPUT, OWN_ID)
-    eq(result.length, 1)
-  })
-
-  // ── Řazení — vlastní mají přednost při stejném skóre ─────────────────────
-  console.log('\n── Řazení ───────────────────────────────────────────────────────')
-
-  test('Vlastní případ (10) předchází cizímu (10) při stejném skóre', () => {
-    const own   = mkCase(OWN_ID,   'Transit 2.2 TDCi (2006–2014)', ['P0401'], ['Ztráta výkonu', 'Černý kouř'])
-    const other = mkCase(OTHER_ID, 'Transit 2.2 TDCi (2006–2014)', ['P0401'], ['Ztráta výkonu', 'Černý kouř'])
-    const result = findSimilarInCloud([other, own], INPUT, OWN_ID)
-    eq(result[0].installationId, OWN_ID)
-  })
-
-  test('Cizí případ s vyšším skóre (11.5) je před vlastním (10)', () => {
-    const own   = mkCase(OWN_ID,   'Transit 2.2 TDCi (2006–2014)', ['P0401'], ['Ztráta výkonu'])   // 10
-    const other = mkCase(OTHER_ID, 'Transit 2.2 TDCi (2006–2014)', ['P0401'], ['Ztráta výkonu', 'Černý kouř']) // 11.5
-    const result = findSimilarInCloud([own, other], INPUT, OWN_ID)
-    eq(result[0].installationId, OTHER_ID)
-  })
-
-  test('Max 5 výsledků', () => {
-    const cases = Array.from({ length: 10 }, () =>
-      mkCase(OWN_ID, 'Transit 2.2 TDCi (2006–2014)', ['P0401'], ['Ztráta výkonu', 'Černý kouř'])
-    )
-    const result = findSimilarInCloud(cases, INPUT, OWN_ID)
-    assert(result.length <= 5, `Vráceno ${result.length}, max je 5`)
-  })
-
-  test('Prázdná databáze → prázdný výsledek', () => {
-    eq(findSimilarInCloud([], INPUT, OWN_ID), [])
+  test('Prázdné zprávy → prázdné pole', () => {
+    const { symptoms, obdCodes } = extractSignals({ messages: [] })
+    assert.strictEqual(symptoms.length, 0)
+    assert.strictEqual(obdCodes.length, 0)
   })
 
   // ── Výsledky ───────────────────────────────────────────────────────────────

@@ -282,24 +282,31 @@ async function testConnection(supabaseUrl, anonKey) {
   })
 }
 
+
 /**
- * Stáhne celou databázi z Supabase pro lokální RAG cache.
+ * Zavolá Edge Function search-cases která provede RAG scoring na straně serveru.
+ * Vrátí max 5 nejrelevantnějších výsledků — nikdy celou databázi.
+ *
+ * Anon klíč opravňuje pouze volání této funkce.
+ * Přímý SELECT na tabulku gearbrain_cases je pro anon zakázán.
+ *
+ * @returns {Promise<{ cases: Object[], error: string|null }>}
  */
-async function fetchAll(supabaseUrl, anonKey, limit = 10000) {
+async function searchCases(supabaseUrl, anonKey, input, installationId) {
   try {
-    const path = `/rest/v1/gearbrain_cases?select=*&order=closed_at.desc&limit=${limit}`
-    const { body: rows } = await supabaseRequest('GET', supabaseUrl, anonKey, path, null, 20000)
-    if (!Array.isArray(rows)) return { cases: [], count: 0, limitReached: false, error: 'Neočekávaná odpověď', fetchedAt: null }
-    return {
-      cases:        rows.map(rowToCase),
-      count:        rows.length,
-      limitReached: rows.length === limit,
-      error:        null,
-      fetchedAt:    new Date().toISOString(),
-    }
+    const { body } = await supabaseRequest(
+      'POST', supabaseUrl, anonKey,
+      '/functions/v1/search-cases',
+      { ...input, installationId },
+      8000,
+      { 'Prefer': '' }
+    )
+    const cases = Array.isArray(body?.cases) ? body.cases : []
+    return { cases, error: null }
   } catch (e) {
-    return { cases: [], count: 0, limitReached: false, error: e.message, fetchedAt: null }
+    // Síťová chyba / timeout — offline degradation, diagnostika pokračuje bez RAG
+    return { cases: [], error: e.message }
   }
 }
 
-module.exports = { pushCase, reportViolation, fetchAll, testConnection, validateCase, caseToRow, rowToCase }
+module.exports = { pushCase, reportViolation, searchCases, testConnection, validateCase, caseToRow, rowToCase }
