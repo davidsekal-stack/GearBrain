@@ -1,4 +1,5 @@
 import { extractSignals } from "./rag.js";
+import { getBrandEntry }  from "../constants/index.js";
 
 // ── Limity ────────────────────────────────────────────────────────────────────
 
@@ -93,19 +94,25 @@ export function smartRepair(raw) {
 
 /**
  * Sestaví system prompt pro Claude.
+ * Odborný kontext AI se odvíjí od značky vozidla (lookup z VEHICLE_CATALOG).
  * Pokud existují podobné uzavřené případy, jsou vloženy jako RAG blok.
- * @param {Array} similarCases - výsledek searchCases() z Edge Function
+ *
+ * @param {Array}  similarCases - výsledek searchCases() z Edge Function
+ * @param {Object} vehicle      - { brand, model, mileage } aktuálního případu
  * @returns {string}
  */
-export function buildSystemPrompt(similarCases) {
-  const ragBlock = similarCases.length > 0 ? buildRagBlock(similarCases) : "";
+export function buildSystemPrompt(similarCases, vehicle = {}) {
+  const entry    = getBrandEntry(vehicle.brand)
+  const expertise = entry?.expertise
+    ?? "užitková vozidla pro evropský trh (EU spec), včetně systémů AdBlue, DPF Euro 5/6 a SCR"
+  const ragBlock = similarCases.length > 0 ? buildRagBlock(similarCases) : ""
 
-  return `Jsi expertní AI diagnostika pro mechaniky specializující se na užitková vozidla pro evropský trh (EU spec). Máš hluboké znalosti všech generací Ford Transit a jejich motorových variant (TDCi, EcoBlue, EcoBoost atd.) od roku 2000 do současnosti.${ragBlock}
+  return `Jsi expertní AI diagnostika pro mechaniky specializující se na ${expertise}.${ragBlock}
 
 Když dostaneš příznaky, OBD kódy nebo popis závady, vrať POUZE validní JSON (bez textu před/za JSON):
 {"shrnutí":"...","závady":[{"název":"...","pravděpodobnost":85,"popis":"...","příznaky_shoda":[],"obd_kódy":[],"díly":[],"postup":"...","naléhavost":"vysoká","poznámka":"..."}],"doporučené_testy":[],"varování":null,"další_info":null}
 
-Pravidla: Odpovídáš VÝHRADNĚ na otázky týkající se diagnostiky a opravy vozidel. Pokud dostaneš dotaz nesouvisející s diagnostikou vozidla, vrať JSON se závadou název "Nesouvisející dotaz" a pravděpodobností 0 a popisem "Tento systém slouží pouze pro diagnostiku vozidel Ford Transit." Jinak: Když nevíš, přiznej to. 1–4 závady seřazené dle pravděpodobnosti. Naléhavost: nízká/střední/vysoká/kritická. Zohledni EU specifika (AdBlue, DPF Euro6). VRAŤ POUZE JSON.`;
+Pravidla: Odpovídáš VÝHRADNĚ na otázky týkající se diagnostiky a opravy vozidel. Pokud dostaneš dotaz nesouvisející s diagnostikou vozidla, vrať JSON se závadou název "Nesouvisející dotaz" a pravděpodobností 0 a popisem "Tento systém slouží pouze pro diagnostiku vozidel." Jinak: Když nevíš, přiznej to. 1–4 závady seřazené dle pravděpodobnosti. Naléhavost: nízká/střední/vysoká/kritická. Zohledni EU specifika (AdBlue, DPF Euro6). VRAŤ POUZE JSON.`
 }
 
 function buildRagBlock(cases) {

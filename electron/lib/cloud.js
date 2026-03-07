@@ -160,7 +160,7 @@ function rowToCase(row) {
   return {
     id:             row.id,
     localId:        row.local_id,
-    name:           `[Cloud] ${row.vehicle_model || 'Transit'} | ${row.resolution.slice(0, 40)}`,
+    name:           `[Cloud] ${row.vehicle_brand ? row.vehicle_brand + ' ' : ''}${row.vehicle_model || 'Neznámý model'} | ${row.resolution.slice(0, 40)}`,
     status:         'uzavřený',
     createdAt:      row.created_at,
     closedAt:       row.closed_at,
@@ -168,7 +168,7 @@ function rowToCase(row) {
     fromCloud:      true,
     installationId: row.installation_id,
     vehicle: {
-      brand:   row.vehicle_brand  || 'Ford',
+      brand:   row.vehicle_brand  || '',
       model:   row.vehicle_model  || '',
       mileage: row.mileage?.toString() || '',
     },

@@ -248,10 +248,10 @@ test('Null symptoms → prázdné pole symptoms', () => {
   eq(input.symptoms, [])
 })
 
-test('Null vehicle_brand → fallback "Ford"', () => {
+test('Null vehicle_brand → prázdný string (žádný hardcoded fallback)', () => {
   const row = { ...SUPABASE_ROW, vehicle_brand: null }
   const c   = rowToCase(row)
-  eq(c.vehicle.brand, 'Ford')
+  eq(c.vehicle.brand, '')
 })
 
 // ── Roundtrip test ────────────────────────────────────────────────────────────

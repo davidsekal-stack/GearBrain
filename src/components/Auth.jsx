@@ -344,3 +344,78 @@ export function SettingsPanel({ t, onClose, onKeyDeleted, onCloudConfigSaved }) 
     </div>
   );
 }
+
+// ── ConsentScreen ─────────────────────────────────────────────────────────────
+
+export function ConsentScreen({ t, onAccept }) {
+  return (
+    <div style={{ height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0d0f12", fontFamily: "'IBM Plex Mono','Courier New',monospace", padding: 24 }}>
+      <div style={{ width: "100%", maxWidth: 560 }}>
+
+        {/* Logo */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 32 }}>
+          <div style={{ width: 32, height: 32, background: "#2563eb", display: "flex", alignItems: "center", justifyContent: "center", clipPath: "polygon(10% 0%,90% 0%,100% 10%,100% 90%,90% 100%,10% 100%,0% 90%,0% 10%)" }}>
+            <span style={{ fontSize: "16px" }}>🔧</span>
+          </div>
+          <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontSize: "1.6rem", fontWeight: 800, color: "#f1f5f9", letterSpacing: "0.05em" }}>
+            GEAR<span style={{ color: "#2563eb" }}>Brain</span>
+          </div>
+        </div>
+
+        <div style={{ background: "#131720", border: "1px solid #1e293b", borderRadius: 4, padding: 28 }}>
+          <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontSize: "1.3rem", fontWeight: 700, color: "#f1f5f9", marginBottom: 6, letterSpacing: "0.05em" }}>
+            OCHRANA OSOBNÍCH ÚDAJŮ
+          </div>
+          <div style={{ fontSize: "0.68rem", color: "#2563eb", letterSpacing: "0.1em", marginBottom: 20 }}>
+            GDPR — PŘED ZAHÁJENÍM SI PŘEČTĚTE
+          </div>
+
+          <div style={{ fontSize: "0.83rem", color: "#94a3b8", lineHeight: 1.8, marginBottom: 20 }}>
+            Aplikace GearBrain shromažďuje a odesílá <strong style={{ color: "#f1f5f9" }}>anonymní diagnostická data</strong> do sdílené cloudové databáze za účelem zlepšení přesnosti diagnostiky pro všechny uživatele.
+          </div>
+
+          {/* Co se odesílá */}
+          <div style={{ background: "#0d1117", border: "1px solid #1e293b", borderRadius: 2, padding: "12px 16px", marginBottom: 16 }}>
+            <div style={{ fontSize: "0.65rem", color: "#2563eb", letterSpacing: "0.1em", marginBottom: 10 }}>CO SE ODESÍLÁ</div>
+            {[
+              ["Model vozidla a nájezd", "např. Transit 2.2 TDCi, 185 000 km"],
+              ["OBD kódy a příznaky závady", "např. P0401, ztráta výkonu"],
+              ["Popis provedené opravy", "vámi zadaný text při uzavření případu"],
+              ["Anonymní ID instalace", "náhodné UUID, nelze spojit s osobou"],
+            ].map(([title, desc]) => (
+              <div key={title} style={{ display: "flex", gap: 8, marginBottom: 6, fontSize: "0.78rem" }}>
+                <span style={{ color: "#22c55e", flexShrink: 0 }}>✓</span>
+                <span><span style={{ color: "#f1f5f9" }}>{title}</span> <span style={{ color: "#475569" }}>— {desc}</span></span>
+              </div>
+            ))}
+          </div>
+
+          {/* Co se neodesílá */}
+          <div style={{ background: "#0d1117", border: "1px solid #1e293b", borderRadius: 2, padding: "12px 16px", marginBottom: 20 }}>
+            <div style={{ fontSize: "0.65rem", color: "#475569", letterSpacing: "0.1em", marginBottom: 10 }}>CO SE NEODESÍLÁ</div>
+            {[
+              "Jméno, adresa ani jiné osobní údaje",
+              "VIN číslo ani SPZ vozidla",
+              "API klíč ani přihlašovací údaje",
+              "Obsah AI konverzace",
+            ].map((item) => (
+              <div key={item} style={{ display: "flex", gap: 8, marginBottom: 6, fontSize: "0.78rem" }}>
+                <span style={{ color: "#dc2626", flexShrink: 0 }}>✕</span>
+                <span style={{ color: "#475569" }}>{item}</span>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ fontSize: "0.75rem", color: "#475569", lineHeight: 1.7, marginBottom: 24, borderTop: "1px solid #1e293b", paddingTop: 16 }}>
+            Data jsou zpracovávána na základě <strong style={{ color: "#64748b" }}>oprávněného zájmu</strong> (čl. 6 odst. 1 písm. f GDPR) za účelem zlepšení diagnostiky vozidel. Správcem dat je provozovatel tohoto softwaru. Svůj souhlas můžete kdykoliv odvolat odinstalováním aplikace.
+          </div>
+
+          <button onClick={onAccept}
+            style={{ width: "100%", background: "#2563eb", color: "#fff", border: "none", padding: "12px", fontSize: "0.82rem", fontWeight: 700, letterSpacing: "0.08em", cursor: "pointer", fontFamily: "inherit", borderRadius: 2 }}>
+            ROZUMÍM A SOUHLASÍM → POKRAČOVAT
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

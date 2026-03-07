@@ -6,7 +6,7 @@ import { uid, fmtDate, fmtMileage }         from "./lib/utils.js";
 import { smartRepair, buildSystemPrompt, checkTopicRelevance, CASE_TOKEN_LIMIT } from "./lib/ai.js";
 import DiagCard                             from "./components/DiagCard.jsx";
 import InputForm, { FollowUpPrompt }        from "./components/InputForm.jsx";
-import { ApiKeyScreen, SettingsPanel }      from "./components/Auth.jsx";
+import { ApiKeyScreen, SettingsPanel, ConsentScreen } from "./components/Auth.jsx";
 
 // ── Storage wrapper ───────────────────────────────────────────────────────────
 const store = {
@@ -63,6 +63,7 @@ export default function App() {
 
   const [appReady,     setAppReady]     = useState(false);
   const [hasApiKey,    setHasApiKey]    = useState(false);
+  const [hasConsent,   setHasConsent]   = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
   const [cases,      setCases]      = useState([]);
@@ -96,11 +97,13 @@ export default function App() {
   // ── Init ────────────────────────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
-      const [apiKey, saved] = await Promise.all([
+      const [apiKey, saved, consent] = await Promise.all([
         window.electronAPI.apiKey.get(),
         store.get(SESSIONS_KEY),
+        store.get("gearbrain_consent"),
       ]);
       setHasApiKey(!!apiKey);
+      setHasConsent(!!consent);
       if (saved) { try { setCases(JSON.parse(saved)); } catch (_) {} }
       const cfg = await window.electronAPI.cloud.configGet();
       if (cfg.installationId) setInstallationId(cfg.installationId);
@@ -219,7 +222,7 @@ export default function App() {
     try {
       // Počkáme na RAG (většinou doběhne dřív než bychom promptem sestavili)
       await ragPromise;
-      const data   = await window.electronAPI.callClaude({ systemPrompt: buildSystemPrompt(similar), userMessage: userPrompt, maxTokens: 4000 });
+      const data   = await window.electronAPI.callClaude({ systemPrompt: buildSystemPrompt(similar, vehicle), userMessage: userPrompt, maxTokens: 4000 });
       const raw    = data.content.map((b) => b.text ?? "").join("");
       const parsed = smartRepair(raw);
 
@@ -234,7 +237,7 @@ export default function App() {
       updateCase(caseId, (c) => {
         const isFirst = c.messages.filter((m) => m.type === "diagnosis").length === 0;
         const newName = isFirst && parsed.závady[0]
-          ? `${vehicle.model ? vehicle.model.split(" ").slice(0, 3).join(" ") : "Transit"} | ${parsed.závady[0].název}`
+          ? `${vehicle.model?.split(" ").slice(0, 3).join(" ") || vehicle.brand || "Vozidlo"} | ${parsed.závady[0].název}`
           : c.name;
         return {
           messages: [...c.messages, diagMsg],
@@ -317,6 +320,14 @@ export default function App() {
       </div>
     );
   }
+
+  if (!hasConsent) {
+    return <ConsentScreen t={DARK} onAccept={() => {
+      store.set("gearbrain_consent", new Date().toISOString());
+      setHasConsent(true);
+    }} />;
+  }
+
   if (!hasApiKey) return <ApiKeyScreen t={t} onSaved={() => setHasApiKey(true)} />;
 
   // ── Hlavní render ────────────────────────────────────────────────────────────
