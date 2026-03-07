@@ -80,6 +80,11 @@ function setupAutoUpdater() {
   setTimeout(() => autoUpdater.checkForUpdates(), 3000)
 }
 
+// ── IPC: Auto-updater ─────────────────────────────────────────────────────────
+ipcMain.handle('updater:download', () => autoUpdater.downloadUpdate())
+ipcMain.handle('updater:install',  () => autoUpdater.quitAndInstall())
+ipcMain.handle('updater:check',    () => autoUpdater.checkForUpdates())
+
 app.whenReady().then(() => {
   createWindow()
   setupAutoUpdater()
