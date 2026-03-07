@@ -36,9 +36,10 @@ function supabaseRequest(method, supabaseUrl, anonKey, path, body = null, timeou
     }
 
     const req = https.request(options, (res) => {
-      let data = ''
-      res.on('data', c => { data += c })
+      const chunks = []
+      res.on('data', c => { chunks.push(c) })
       res.on('end', () => {
+        const data = Buffer.concat(chunks).toString('utf8')
         if (!data.trim()) { resolve({ body: [], headers: res.headers }); return }
         try {
           const parsed = JSON.parse(data)
@@ -96,23 +97,23 @@ function validateCase(kase) {
     return { ok: false, reason: 'Popis opravy obsahuje opakující se znaky.' }
   }
 
-  // Minimálně 4 unikátní slova (>2 znaky) v resolution
+  // Minimálně 2 unikátní slova (>2 znaky) v resolution
   const uniqueWords = new Set(
     resolution.toLowerCase().split(/\s+/).filter(w => w.length > 2)
   )
-  if (uniqueWords.size < 4) {
+  if (uniqueWords.size < 2) {
     return { ok: false, reason: 'Popis opravy je příliš stručný — přidejte více informací.' }
   }
 
   // ── Diagnostické signály ────────────────────────────────────────────────────
-  // Alespoň jeden z: OBD kód, příznak, nebo manuální popis (>20 znaků)
+  // Alespoň jeden z: OBD kód, příznak, nebo manuální popis (≥10 znaků)
 
   const hasObd      = obdCodes.length > 0
   const hasSymptom  = symptoms.length > 0
-  const hasDesc     = description.length >= 20
+  const hasDesc     = description.length >= 10
 
   if (!hasObd && !hasSymptom && !hasDesc) {
-    return { ok: false, reason: 'Případ musí obsahovat OBD kód, příznak nebo popis problému (alespoň 20 znaků).' }
+    return { ok: false, reason: 'Případ musí obsahovat OBD kód, příznak nebo popis problému (alespoň 10 znaků).' }
   }
 
   // ── Formát OBD kódů ─────────────────────────────────────────────────────────
@@ -188,31 +189,15 @@ function rowToCase(row) {
 
 /**
  * Odešle uzavřený případ do globální Supabase databáze.
+ * Validace proběhla v UI před uzavřením — zde jen druhá obranná vrstva + push.
  *
- * Před odesláním provede klientskou validaci.
- * Pokud instalace překročila limit porušení, push se zamítne a zaloguje.
- *
- * @param {string}  supabaseUrl
- * @param {string}  anonKey
- * @param {string}  installationId
- * @param {Object}  kase
- * @param {Object}  violationState  - { count, blocked } z electron-store
- * @returns {Promise<{ ok: boolean, blocked: boolean, violation: string|null, error: string|null }>}
+ * @returns {Promise<{ ok: boolean, error: string|null }>}
  */
-async function pushCase(supabaseUrl, anonKey, installationId, kase, violationState = { count: 0, blocked: false }) {
-
-  // Blokovaná instalace
-  if (violationState.blocked) {
-    return { ok: false, blocked: true, violation: null, error: 'Instalace je blokována kvůli opakovanému porušování pravidel.' }
-  }
-
-  // Klientská validace
+async function pushCase(supabaseUrl, anonKey, installationId, kase) {
+  // Druhá obranná vrstva — pro případ přímého volání mimo UI
   const { ok, reason } = validateCase(kase)
-  if (!ok) {
-    return { ok: false, blocked: false, violation: reason, error: null }
-  }
+  if (!ok) return { ok: false, error: reason }
 
-  // Push do Supabase
   try {
     const row = caseToRow(kase, installationId)
     await supabaseRequest(
@@ -222,32 +207,10 @@ async function pushCase(supabaseUrl, anonKey, installationId, kase, violationSta
       8000,
       { 'Prefer': 'return=minimal,resolution=ignore-duplicates' }
     )
-    return { ok: true, blocked: false, violation: null, error: null }
+    return { ok: true, error: null }
   } catch (e) {
-    return { ok: false, blocked: false, violation: null, error: e.message }
+    return { ok: false, error: e.message }
   }
-}
-
-/**
- * Zaloguje porušení pravidel do Supabase.
- * Databázový trigger na této tabulce pošle email notifikaci.
- * Fire-and-forget — chyba se tiše ignoruje.
- */
-async function reportViolation(supabaseUrl, anonKey, installationId, reason, violationCount) {
-  try {
-    await supabaseRequest(
-      'POST', supabaseUrl, anonKey,
-      '/rest/v1/gearbrain_violations',
-      {
-        installation_id:  installationId,
-        reason,
-        violation_count:  violationCount,
-        blocked:          violationCount >= 3,
-      },
-      5000,
-      { 'Prefer': 'return=minimal' }
-    )
-  } catch (_) { /* tiše ignorujeme — notifikace není kritická */ }
 }
 
 /**
@@ -309,4 +272,4 @@ async function searchCases(supabaseUrl, anonKey, input, installationId) {
   }
 }
 
-module.exports = { pushCase, reportViolation, searchCases, testConnection, validateCase, caseToRow, rowToCase }
+module.exports = { pushCase, searchCases, testConnection, validateCase, caseToRow, rowToCase }

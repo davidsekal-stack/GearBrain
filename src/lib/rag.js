@@ -16,7 +16,7 @@
  *   OTHER_THRESHOLD = 10 — záznamy od ostatních servisů
  */
 
-const OWN_THRESHOLD   = 8
+const OWN_THRESHOLD   = 6
 const OTHER_THRESHOLD = 10
 
 // FIX #5: Max příspěvek z klíčových slov volného textu

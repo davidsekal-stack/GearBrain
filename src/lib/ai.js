@@ -110,22 +110,35 @@ Pravidla: Odpovídáš VÝHRADNĚ na otázky týkající se diagnostiky a opravy
 
 function buildRagBlock(cases) {
   const entries = cases.map((c, i) => {
-    const { symptoms, obdCodes } = extractSignals(c);
-    const vehicle = [c.vehicle?.brand, c.vehicle?.model].filter(Boolean).join(" ") || "?";
+    const { symptoms, obdCodes } = extractSignals(c)
+    const vehicle = [c.vehicle?.brand, c.vehicle?.model].filter(Boolean).join(" ") || "?"
+    const score   = c.ragScore ?? 0
+
+    // Odstupňování podle skutečného skóre z Edge Function
+    // Skóre: brand(2) + model(3) + OBD×4 + příznak×1.5 + text(max 2)
+    // Vysoká shoda ≥ 11 = min. model + OBD + příznak
+    // Střední shoda ≥ 8  = min. model + OBD nebo OBD + 2 příznaky
+    // Částečná shoda < 8 = slabá kombinace signálů
+    const strength = score >= 11 ? "🔴 VYSOKÁ SHODA"
+                   : score >= 8  ? "🟡 STŘEDNÍ SHODA"
+                                 : "🟢 ČÁSTEČNÁ SHODA"
+
     return (
-      `[${i + 1}] ${vehicle} | ${c.vehicle?.mileage ?? "?"}km\n` +
+      `[${i + 1}] ${strength} (skóre: ${score.toFixed(1)}) | ${vehicle}\n` +
       `   Příznaky: ${symptoms.join(", ") || "—"}\n` +
       `   OBD: ${obdCodes.join(", ") || "—"}\n` +
       `   ✅ Ověřené řešení: ${c.resolution}`
-    );
-  });
+    )
+  })
 
-  // FIX #4: Místo "MUSÍŠ" dáváme AI prostor pro vlastní úsudek.
-  // Silná direktiva přepisovala diagnózu i při jen částečné shodě.
   return `
 
 OVĚŘENÉ OPRAVY Z DATABÁZE SERVISU:
 ${entries.join("\n\n")}
 
-INSTRUKCE K DATABÁZI: Tyto záznamy jsou reálné opravy provedené na stejném nebo podobném vozidle. Pokud se OBD kódy nebo příznaky shodují, silně zvažuj tato řešení jako primární závadu — mají přednost před obecnou diagnostikou. Pokud shoda není jednoznačná, uveď je jako možnou variantu a vysvětli rozdíly.`;
+INSTRUKCE K DATABÁZI:
+- 🔴 VYSOKÁ SHODA: Toto řešení MUSÍ být na 1. nebo 2. místě — má prokázaný výsledek na velmi podobném vozidle se shodnými OBD kódy i příznaky.
+- 🟡 STŘEDNÍ SHODA: Zahrň jako pravděpodobnou variantu, uveď výše než obecné hypotézy.
+- 🟢 ČÁSTEČNÁ SHODA: Zmiň jako možnost, hodnoť volně podle ostatních příznaků.
+Pokud databázové řešení neodpovídá aktuálním příznakům, vysvětli proč se liší.`
 }

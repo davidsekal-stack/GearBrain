@@ -14,7 +14,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
 // ── Scoring konstanty (shodné s src/lib/rag.js) ───────────────────────────────
-const OWN_THRESHOLD   = 8
+const OWN_THRESHOLD   = 6
 const OTHER_THRESHOLD = 10
 const MAX_TEXT_SCORE  = 2
 
@@ -40,7 +40,7 @@ function computeSimilarity(row: any, input: any): number {
   let textScore = 0
   for (const word of (input.text ?? '').toLowerCase().split(/\s+/).filter((w: string) => w.length > 4)) {
     if (allText.includes(word)) {
-      textScore += 0.3
+      textScore = Math.min(textScore + 0.3, MAX_TEXT_SCORE)
       if (textScore >= MAX_TEXT_SCORE) break
     }
   }
@@ -120,20 +120,21 @@ Deno.serve(async (req) => {
     const input = { vehicle, symptoms, obdCodes, text }
 
     // Scoring + filtrování + řazení
-    const results = (rows ?? [])
-      .map((row: any) => {
-        const score   = computeSimilarity(row, input)
-        const isOwn   = row.installation_id === installationId
-        const threshold = isOwn ? OWN_THRESHOLD : OTHER_THRESHOLD
-        return { row, score, isOwn, passes: score >= threshold }
-      })
+    const scored = (rows ?? []).map((row: any) => {
+      const score     = computeSimilarity(row, input)
+      const isOwn     = row.installation_id === installationId
+      const threshold = isOwn ? OWN_THRESHOLD : OTHER_THRESHOLD
+      return { row, score, isOwn, passes: score >= threshold }
+    })
+
+    const results = scored
       .filter((x: any) => x.passes)
       .sort((a: any, b: any) =>
         b.score - a.score ||
         (a.isOwn && !b.isOwn ? -1 : !a.isOwn && b.isOwn ? 1 : 0)
       )
       .slice(0, 5)
-      .map((x: any) => rowToCase(x.row))
+      .map((x: any) => ({ ...rowToCase(x.row), ragScore: x.score, ragIsOwn: x.isOwn }))
 
     return new Response(
       JSON.stringify({ cases: results, count: results.length }),

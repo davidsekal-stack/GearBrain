@@ -118,10 +118,11 @@ ipcMain.handle('claude:call', (_e, { systemPrompt, userMessage, maxTokens = 4000
         'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(body),
       },
     }, (res) => {
-      let data = ''
-      res.on('data', c => { data += c })
+      const chunks = []
+      res.on('data', c => { chunks.push(c) })
       res.on('end', () => {
         try {
+          const data   = Buffer.concat(chunks).toString('utf8')
           const parsed = JSON.parse(data)
           if (parsed.error) reject(new Error(`Anthropic: ${parsed.error.message}`))
           else resolve(parsed)
@@ -129,7 +130,7 @@ ipcMain.handle('claude:call', (_e, { systemPrompt, userMessage, maxTokens = 4000
       })
     })
     req.on('error', e => reject(new Error(`Síťová chyba: ${e.message}`)))
-    req.setTimeout(60000, () => { req.destroy(); reject(new Error('Vypršel časový limit (60s).')) })
+    req.setTimeout(120000, () => { req.destroy(); reject(new Error('Vypršel časový limit (120s). Zkontrolujte připojení k internetu.')) })
     req.write(body)
     req.end()
   })
@@ -194,31 +195,13 @@ ipcMain.handle('cloud:test', async () => {
 
 /**
  * Odešle uzavřený případ do globální databáze.
- * Spravuje violation tracking — po 3 porušeních instalaci zablokuje.
+ * Validace proběhla v UI — zde jen push do Supabase.
  * Volá se fire-and-forget z App.jsx.
  */
 ipcMain.handle('cloud:push', async (_e, kase) => {
   const cfg = getCloudConfig()
   if (!cfg) return { ok: false, error: 'cloud není nakonfigurovaný' }
-
-  const installationId   = getInstallationId()
-  const violationState   = store.get('violation_state', { count: 0, blocked: false })
-
-  const result = await cloud.pushCase(cfg.url, cfg.key, installationId, kase, violationState)
-
-  // Zaznamenat porušení validace (ne síťové chyby)
-  if (!result.ok && result.violation) {
-    const newCount = violationState.count + 1
-    const blocked  = newCount >= 3
-    const newState = { count: newCount, blocked, lastViolation: result.violation, updatedAt: new Date().toISOString() }
-    store.set('violation_state', newState)
-
-    // Reportovat do Supabase (trigger pošle email)
-    cloud.reportViolation(cfg.url, cfg.key, installationId, result.violation, newCount)
-      .catch(() => {})
-  }
-
-  return result
+  return cloud.pushCase(cfg.url, cfg.key, getInstallationId(), kase)
 })
 
 

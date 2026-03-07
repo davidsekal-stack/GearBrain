@@ -73,6 +73,7 @@ export default function App() {
   const [error,      setError]      = useState(null);
   const [closeModal, setCloseModal] = useState(false);
   const [resolution, setResolution] = useState("");
+  const [closeError,  setCloseError]  = useState(null);
   const [deleteId,   setDeleteId]   = useState(null);
   const [newVehicle, setNewVehicle] = useState(EMPTY_VEHICLE);
 
@@ -180,18 +181,6 @@ export default function App() {
 
     const ragInput = { vehicle, symptoms: allSymptoms, obdCodes: allObdCodes, text: allTexts.join(" ") };
 
-    // RAG — Edge Function provede scoring na serveru, vrátí max 5 výsledků
-    // Žádná lokální cache — databáze nikdy neopustí server
-    let similar = [];
-    try {
-      const { cases } = await window.electronAPI.cloud.searchCases(ragInput, installationId);
-      similar = cases ?? [];
-      setCloudStatus("ok");
-    } catch (_) {
-      setCloudStatus("error");
-      // Tiše pokračujeme bez RAG
-    }
-
     const userPrompt = [
       (vehicle.brand || vehicle.model) && `Vozidlo: ${[vehicle.brand, vehicle.model].filter(Boolean).join(" ")}`,
       vehicle.mileage                  && `Nájezd: ${vehicle.mileage} km`,
@@ -221,7 +210,15 @@ export default function App() {
       }
     }
 
+    // RAG + Claude API běží paralelně — RAG výsledky se vloží do promptu jakmile jsou k dispozici
+    let similar = [];
+    const ragPromise = window.electronAPI.cloud.searchCases(ragInput, installationId)
+      .then(({ cases }) => { similar = cases ?? []; setCloudStatus("ok"); })
+      .catch(() => { setCloudStatus("error"); });
+
     try {
+      // Počkáme na RAG (většinou doběhne dřív než bychom promptem sestavili)
+      await ragPromise;
       const data   = await window.electronAPI.callClaude({ systemPrompt: buildSystemPrompt(similar), userMessage: userPrompt, maxTokens: 4000 });
       const raw    = data.content.map((b) => b.text ?? "").join("");
       const parsed = smartRepair(raw);
@@ -261,21 +258,42 @@ export default function App() {
 
   const closeCase = useCallback(() => {
     if (!resolution.trim()) return;
-    const closedAt = new Date().toISOString();
-    const resText  = resolution.trim();
-
-    // FIX #8: Získáme data případu PŘED state update — žádný setTimeout hack
+    const resText     = resolution.trim();
     const currentCase = casesRef.current.find((c) => c.id === activeId);
 
+    // Validace přímo v UI — uživatel vidí chybu okamžitě, žádné tiché blokování
+    if (resText.length < 10) {
+      setCloseError(`Popis opravy je příliš krátký (${resText.length} znaků, minimum 10).`);
+      return;
+    }
+    if (resText.length > 200) {
+      setCloseError(`Popis opravy je příliš dlouhý (${resText.length} znaků, maximum 200).`);
+      return;
+    }
+    if (/(.)\1{6,}/.test(resText)) {
+      setCloseError("Popis opravy obsahuje opakující se znaky.");
+      return;
+    }
+    const uniqueWords = new Set(resText.toLowerCase().split(/\s+/).filter(w => w.length > 2));
+    if (uniqueWords.size < 2) {
+      setCloseError("Popis opravy je příliš stručný — přidejte alespoň 2 různá slova.");
+      return;
+    }
+
+    const closedAt = new Date().toISOString();
     updateCase(activeId, () => ({ status: "uzavřený", closedAt, resolution: resText }));
 
-    // Cloud push — fire-and-forget s aktuálními daty
     if (currentCase) {
       const fullCase = { ...currentCase, status: "uzavřený", closedAt, resolution: resText };
-      window.electronAPI.cloud.push(fullCase).catch(() => { /* tiše ignorujeme */ });
+      window.electronAPI.cloud.push(fullCase)
+        .then((result) => {
+          if (!result.ok) console.warn('[cloud push]', result.error);
+        })
+        .catch((e) => console.warn('[cloud push]', e.message));
     }
 
     setCloseModal(false);
+    setCloseError(null);
     setResolution("");
   }, [activeId, resolution, updateCase]);
 
@@ -674,18 +692,23 @@ export default function App() {
 
       {/* ── MODAL: Uzavřít případ ── */}
       {closeModal && (
-        <Modal onClose={() => setCloseModal(false)} width={500}>
+        <Modal onClose={() => { setCloseModal(false); setCloseError(null); }} width={500}>
           <div style={{ background: t.bgModal, border: `1px solid ${t.border}`, borderRadius: 4, padding: "26px", boxShadow: "0 20px 60px rgba(0,0,0,0.35)" }}>
             <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontSize: "1.4rem", fontWeight: 700, color: t.doneStatusColor, marginBottom: 8 }}>✓ UZAVŘÍT PŘÍPAD</div>
             <p style={{ fontSize: "0.85rem", color: t.textMuted, marginBottom: 16, lineHeight: 1.7 }}>
               Popište provedenou opravu. Tato informace bude uložena do databáze servisu a pomůže při budoucích diagnostikách.
             </p>
             <div style={{ fontSize: "0.68rem", color: t.textFaint, letterSpacing: "0.1em", marginBottom: 6 }}>PROVEDENÁ OPRAVA *</div>
-            <textarea value={resolution} onChange={(e) => setResolution(e.target.value)} autoFocus rows={5}
+            <textarea value={resolution} onChange={(e) => { setResolution(e.target.value); setCloseError(null); }} autoFocus rows={5}
               placeholder="např. Vyměněn EGR ventil + EGR chladič. Po vyčištění sání a regeneraci DPF vozidlo jede bez závad. Kód P0401 vymazán, nevrátil se."
-              style={{ width: "100%", background: t.bgInput, border: `1px solid ${t.borderInput}`, color: t.text, padding: "10px 12px", fontSize: "0.88rem", lineHeight: 1.7, marginBottom: 16, fontFamily: "'IBM Plex Mono',monospace", resize: "vertical", outline: "none", borderRadius: 2 }} />
+              style={{ width: "100%", background: t.bgInput, border: `1px solid ${closeError ? "#dc2626" : t.borderInput}`, color: t.text, padding: "10px 12px", fontSize: "0.88rem", lineHeight: 1.7, marginBottom: closeError ? 8 : 16, fontFamily: "'IBM Plex Mono',monospace", resize: "vertical", outline: "none", borderRadius: 2 }} />
+            {closeError && (
+              <div style={{ fontSize: "0.8rem", color: "#dc2626", marginBottom: 12, padding: "6px 10px", background: "rgba(220,38,38,0.08)", border: "1px solid rgba(220,38,38,0.3)", borderRadius: 2 }}>
+                ⚠ {closeError}
+              </div>
+            )}
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-              <button onClick={() => setCloseModal(false)}
+              <button onClick={() => { setCloseModal(false); setCloseError(null); }}
                 style={{ background: "transparent", border: `1px solid ${t.border}`, color: t.textFaint, padding: "8px 20px", fontSize: "0.82rem", cursor: "pointer", fontFamily: "inherit", borderRadius: 2 }}>
                 Zrušit
               </button>
