@@ -201,7 +201,8 @@ function getInstallationId() {
 /** Nastaví Supabase konfiguraci */
 ipcMain.handle('cloud:config-set', (_e, { url, anonKey }) => {
   store.set('supabase_url', url.trim().replace(/\/$/, ''))
-  store.set('supabase_anon_key', anonKey.trim())
+  // Prázdný klíč = zachovat stávající (aktualizace jen URL)
+  if (anonKey.trim()) store.set('supabase_anon_key', anonKey.trim())
   return { ok: true }
 })
 
@@ -242,7 +243,7 @@ ipcMain.handle('cloud:push', async (_e, kase) => {
   const cfg = getCloudConfig()
   if (!cfg) return { ok: false, error: 'cloud není nakonfigurovaný' }
   const result = await cloud.pushCase(cfg.url, cfg.key, getInstallationId(), kase)
-  if (!result.ok && result.error !== 'validation') {
+  if (!result.ok && !result.validationError) {
     addToPushQueue(kase)
   }
   return result
@@ -263,8 +264,13 @@ async function retryPendingPushes() {
 
   const remaining = []
   for (const kase of queue) {
-    const result = await cloud.pushCase(cfg.url, cfg.key, getInstallationId(), kase)
-    if (!result.ok) remaining.push(kase)
+    try {
+      const result = await cloud.pushCase(cfg.url, cfg.key, getInstallationId(), kase)
+      if (!result.ok && !result.validationError) remaining.push(kase)
+      // Validation errors are dropped — they'll never succeed
+    } catch {
+      remaining.push(kase)
+    }
   }
   store.set(PUSH_QUEUE_KEY, remaining)
   if (remaining.length < queue.length) {

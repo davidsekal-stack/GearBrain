@@ -175,13 +175,13 @@ function rowToCase(row) {
 async function pushCase(supabaseUrl, anonKey, installationId, kase) {
   // Druhá obranná vrstva — pro případ přímého volání mimo UI
   const { ok, reason } = validateCase(kase)
-  if (!ok) return { ok: false, error: reason }
+  if (!ok) return { ok: false, error: reason, validationError: true }
 
   try {
     const row = caseToRow(kase, installationId)
     await supabaseRequest(
       'POST', supabaseUrl, anonKey,
-      '/rest/v1/gearbrain_cases',
+      '/rest/v1/gearbrain_cases?on_conflict=installation_id,local_id',
       row,
       8000,
       { 'Prefer': 'return=minimal,resolution=ignore-duplicates' }

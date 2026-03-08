@@ -178,14 +178,14 @@ export function SettingsPanel({ t, onClose, onKeyDeleted, onCloudConfigSaved }) 
   const saveCloud = async () => {
     const url = cloudUrl.trim();
     const key = cloudKey.trim();
-    if (!url || !key) { setCloudMsg("⚠ Vyplňte URL i klíč"); return; }
+    if (!url) { setCloudMsg("⚠ Vyplňte URL"); return; }
+    if (!cloudEnabled && !key) { setCloudMsg("⚠ Vyplňte anon klíč"); return; }
     if (!url.startsWith("https://")) { setCloudMsg("⚠ URL musí začínat https://"); return; }
     await window.electronAPI.cloud.configSet(url, key);
     setCloudEnabled(true);
-    setCloudKeyMasked(`${key.slice(0, 20)}••••••••${key.slice(-6)}`);
+    if (key) setCloudKeyMasked(`${key.slice(0, 20)}••••••••${key.slice(-6)}`);
     setCloudKey("");
     setCloudMsg("✓ Uloženo — načítám databázi...");
-    // FIX #9: Spustit načtení cloudové DB ihned po uložení konfigurace
     if (onCloudConfigSaved) onCloudConfigSaved();
     setTimeout(() => setCloudMsg(""), 3000);
   };
