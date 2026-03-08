@@ -10,12 +10,14 @@
     "build:mac": "vite build && electron-builder --mac",
     "build:linux": "vite build && electron-builder --linux",
     "postinstall": "electron-builder install-app-deps",
-    "test": "node tests/obd.test.js"
+    "test": "node tests/obd.test.js && node tests/cloud.test.js && node tests/rag.test.js && node tests/validation.test.js && node tests/validation-standalone.test.js"
   },
   "dependencies": {
     "electron-store": "^8.1.0",
     "serialport": "^12.0.0",
-    "electron-updater": "^6.3.4"
+    "electron-updater": "^6.3.4",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.2.1",
@@ -23,9 +25,7 @@
     "electron": "^29.1.0",
     "electron-builder": "^24.9.1",
     "vite": "^5.1.4",
-    "wait-on": "^7.2.0",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "wait-on": "^7.2.0"
   },
   "build": {
     "appId": "cz.gearbrain.app",

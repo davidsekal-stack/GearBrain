@@ -1,9 +1,11 @@
-const { app, BrowserWindow, ipcMain, shell } = require('electron')
-const path  = require('path')
-const https = require('https')
-const Store = require('electron-store')
-const obd   = require('../lib/obd.js')
-const cloud = require('../lib/cloud.js')
+const { app, BrowserWindow, ipcMain, shell, session } = require('electron')
+const path   = require('path')
+const https  = require('https')
+const crypto = require('crypto')
+const Store  = require('electron-store')
+const obd    = require('../lib/obd.js')
+const cloud  = require('../lib/cloud.js')
+const { validateResolution } = require('../lib/validation.js')
 const { autoUpdater } = require('electron-updater')
 
 // ── Persistent storage ────────────────────────────────────────────────────────
@@ -21,10 +23,28 @@ function createWindow() {
     title: 'GearBrain', backgroundColor: '#0d0f12',
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
-      contextIsolation: true, nodeIntegration: false, sandbox: false,
+      contextIsolation: true, nodeIntegration: false, sandbox: true,
     },
     autoHideMenuBar: true,
   })
+
+  // ── CSP ──────────────────────────────────────────────────────────────────────
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [
+          "default-src 'self';" +
+          " script-src 'self';" +
+          " style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;" +
+          " font-src 'self' https://fonts.gstatic.com;" +
+          " connect-src 'self';" +
+          " img-src 'self' data:;"
+        ],
+      },
+    })
+  })
+
   if (isDev) {
     mainWindow.loadURL(VITE_DEV_URL)
     mainWindow.webContents.openDevTools({ mode: 'detach' })
@@ -88,9 +108,13 @@ ipcMain.handle('updater:check',    () => autoUpdater.checkForUpdates())
 app.whenReady().then(() => {
   createWindow()
   setupAutoUpdater()
+  retryPendingPushes()
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
 })
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
+
+// ── IPC: Validace ─────────────────────────────────────────────────────────────
+ipcMain.handle('validate:resolution', (_e, text) => validateResolution(text))
 
 // ── IPC: Storage ──────────────────────────────────────────────────────────────
 ipcMain.handle('storage:get',    (_e, k)    => store.get(k, null))
@@ -107,6 +131,8 @@ ipcMain.handle('model:get', ()      => store.get('anthropic_model', DEFAULT_MODE
 ipcMain.handle('model:set', (_e, m) => { store.set('anthropic_model', m); return true })
 
 // ── IPC: Anthropic API ────────────────────────────────────────────────────────
+let activeClaudeReq = null
+
 ipcMain.handle('claude:call', (_e, { systemPrompt, userMessage, maxTokens = 4000 }) => {
   return new Promise((resolve, reject) => {
     const apiKey = store.get('anthropic_api_key')
@@ -126,6 +152,7 @@ ipcMain.handle('claude:call', (_e, { systemPrompt, userMessage, maxTokens = 4000
       const chunks = []
       res.on('data', c => { chunks.push(c) })
       res.on('end', () => {
+        activeClaudeReq = null
         try {
           const data   = Buffer.concat(chunks).toString('utf8')
           const parsed = JSON.parse(data)
@@ -134,11 +161,21 @@ ipcMain.handle('claude:call', (_e, { systemPrompt, userMessage, maxTokens = 4000
         } catch { reject(new Error('Chyba při zpracování odpovědi API.')) }
       })
     })
-    req.on('error', e => reject(new Error(`Síťová chyba: ${e.message}`)))
-    req.setTimeout(120000, () => { req.destroy(); reject(new Error('Vypršel časový limit (120s). Zkontrolujte připojení k internetu.')) })
+    activeClaudeReq = req
+    req.on('error', e => { activeClaudeReq = null; reject(new Error(`Síťová chyba: ${e.message}`)) })
+    req.setTimeout(120000, () => { req.destroy(); activeClaudeReq = null; reject(new Error('Vypršel časový limit (120s). Zkontrolujte připojení k internetu.')) })
     req.write(body)
     req.end()
   })
+})
+
+ipcMain.handle('claude:abort', () => {
+  if (activeClaudeReq) {
+    activeClaudeReq.destroy()
+    activeClaudeReq = null
+    return { ok: true }
+  }
+  return { ok: false }
 })
 
 // ── IPC: Cloud (Supabase) ─────────────────────────────────────────────────────
@@ -155,11 +192,7 @@ function getCloudConfig() {
 function getInstallationId() {
   let id = store.get('installation_id', null)
   if (!id) {
-    // Jednoduchá UUID v4 generace bez závislostí
-    id = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-      const r = Math.random() * 16 | 0
-      return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16)
-    })
+    id = crypto.randomUUID()
     store.set('installation_id', id)
   }
   return id
@@ -198,16 +231,46 @@ ipcMain.handle('cloud:test', async () => {
   return cloud.testConnection(cfg.url, cfg.key)
 })
 
+// ── Cloud push s retry frontou ────────────────────────────────────────────────
+const PUSH_QUEUE_KEY = 'gearbrain_push_queue'
+
 /**
  * Odešle uzavřený případ do globální databáze.
- * Validace proběhla v UI — zde jen push do Supabase.
- * Volá se fire-and-forget z App.jsx.
+ * Při selhání uloží případ do retry fronty.
  */
 ipcMain.handle('cloud:push', async (_e, kase) => {
   const cfg = getCloudConfig()
   if (!cfg) return { ok: false, error: 'cloud není nakonfigurovaný' }
-  return cloud.pushCase(cfg.url, cfg.key, getInstallationId(), kase)
+  const result = await cloud.pushCase(cfg.url, cfg.key, getInstallationId(), kase)
+  if (!result.ok && result.error !== 'validation') {
+    addToPushQueue(kase)
+  }
+  return result
 })
+
+function addToPushQueue(kase) {
+  const queue = store.get(PUSH_QUEUE_KEY, [])
+  if (queue.some(q => q.id === kase.id)) return
+  queue.push(kase)
+  store.set(PUSH_QUEUE_KEY, queue)
+}
+
+async function retryPendingPushes() {
+  const cfg = getCloudConfig()
+  if (!cfg) return
+  const queue = store.get(PUSH_QUEUE_KEY, [])
+  if (queue.length === 0) return
+
+  const remaining = []
+  for (const kase of queue) {
+    const result = await cloud.pushCase(cfg.url, cfg.key, getInstallationId(), kase)
+    if (!result.ok) remaining.push(kase)
+  }
+  store.set(PUSH_QUEUE_KEY, remaining)
+  if (remaining.length < queue.length) {
+    console.log(`[cloud retry] ${queue.length - remaining.length}/${queue.length} případů úspěšně odesláno`)
+  }
+}
 
 
 /** Zavolá Edge Function search-cases pro RAG (per-query, žádná lokální cache) */

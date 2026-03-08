@@ -1,5 +1,5 @@
-/** Generuje unikátní 8-znakové ID */
-export const uid = () => Math.random().toString(36).slice(2, 10);
+/** Generuje unikátní ID (crypto-safe UUID v4, zkrácený na 8 znaků) */
+export const uid = () => crypto.randomUUID().replace(/-/g, '').slice(0, 8);
 
 /** Formátuje ISO timestamp do cs-CZ: "DD.MM. HH:MM" */
 export const fmtDate = (iso) => {

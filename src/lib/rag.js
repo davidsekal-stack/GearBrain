@@ -12,7 +12,7 @@
  *   +0.3 shoda klíčového slova z volného textu (>4 znaky), max +2 celkem
  *
  * Prahy relevance:
- *   OWN_THRESHOLD   = 8  — záznamy z této instalace
+ *   OWN_THRESHOLD   = 6  — záznamy z této instalace (nižší — chceme vidět i svá starší řešení)
  *   OTHER_THRESHOLD = 10 — záznamy od ostatních servisů
  */
 

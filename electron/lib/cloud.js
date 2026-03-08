@@ -14,6 +14,7 @@
  */
 
 const https = require('https')
+const { validateResolution } = require('./validation.js')
 
 // ── HTTP helper ───────────────────────────────────────────────────────────────
 
@@ -75,35 +76,13 @@ const OBD_REGEX = /^[PCBU][0-9A-F]{4}$/
 function validateCase(kase) {
   const inputs = (kase.messages ?? []).filter(m => m.type === 'input')
 
-  const resolution  = (kase.resolution ?? '').trim()
   const symptoms    = [...new Set(inputs.flatMap(m => m.symptoms ?? []))]
   const obdCodes    = [...new Set(inputs.flatMap(m => m.obdCodes ?? []))]
   const description = inputs.map(m => m.text ?? '').filter(Boolean).join(' ').trim()
 
-  // ── Resolution ──────────────────────────────────────────────────────────────
-
-  if (!resolution) {
-    return { ok: false, reason: 'Chybí popis provedené opravy.' }
-  }
-  if (resolution.length < 10) {
-    return { ok: false, reason: `Popis opravy je příliš krátký (${resolution.length} znaků, minimum 10).` }
-  }
-  if (resolution.length > 200) {
-    return { ok: false, reason: `Popis opravy je příliš dlouhý (${resolution.length} znaků, maximum 200).` }
-  }
-
-  // Detekce opakujících se znaků — "aaaaaaa", "12312312"
-  if (/(.)\1{6,}/.test(resolution)) {
-    return { ok: false, reason: 'Popis opravy obsahuje opakující se znaky.' }
-  }
-
-  // Minimálně 2 unikátní slova (>2 znaky) v resolution
-  const uniqueWords = new Set(
-    resolution.toLowerCase().split(/\s+/).filter(w => w.length > 2)
-  )
-  if (uniqueWords.size < 2) {
-    return { ok: false, reason: 'Popis opravy je příliš stručný — přidejte více informací.' }
-  }
+  // ── Resolution (sdílená validace) ─────────────────────────────────────────
+  const resVal = validateResolution(kase.resolution)
+  if (!resVal.ok) return resVal
 
   // ── Diagnostické signály ────────────────────────────────────────────────────
   // Alespoň jeden z: OBD kód, příznak, nebo manuální popis (≥10 znaků)
@@ -147,7 +126,7 @@ function caseToRow(kase, installationId) {
     installation_id: installationId,
     vehicle_brand:   kase.vehicle?.brand  || null,
     vehicle_model:   kase.vehicle?.model  || null,
-    mileage:         kase.vehicle?.mileage ? parseInt(kase.vehicle.mileage, 10) || null : null,
+    mileage:         kase.vehicle?.mileage ? (parseInt(kase.vehicle.mileage, 10) ?? null) : null,
     symptoms,
     obd_codes:       obdCodes,
     description,
@@ -272,4 +251,4 @@ async function searchCases(supabaseUrl, anonKey, input, installationId) {
   }
 }
 
-module.exports = { pushCase, searchCases, testConnection, validateCase, caseToRow, rowToCase }
+module.exports = { pushCase, searchCases, testConnection, validateCase, validateResolution, caseToRow, rowToCase }

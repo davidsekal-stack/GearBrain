@@ -3,6 +3,10 @@ const { contextBridge, ipcRenderer } = require('electron')
 contextBridge.exposeInMainWorld('electronAPI', {
   // Anthropic API
   callClaude: (params) => ipcRenderer.invoke('claude:call', params),
+  abortClaude: ()      => ipcRenderer.invoke('claude:abort'),
+
+  // Validace (sdílená mezi UI a cloud pushem)
+  validateResolution: (text) => ipcRenderer.invoke('validate:resolution', text),
 
   // Persistent storage
   storage: {
@@ -24,12 +28,28 @@ contextBridge.exposeInMainWorld('electronAPI', {
     set: (model) => ipcRenderer.invoke('model:set', model),
   },
 
-  // Auto-updater
+  // Auto-updater (listenery s cleanup funkcí — zabraňuje memory leaku)
   updater: {
-    onAvailable:  (cb) => ipcRenderer.on('updater:available',  (_e, info)     => cb(info)),
-    onProgress:   (cb) => ipcRenderer.on('updater:progress',   (_e, progress) => cb(progress)),
-    onDownloaded: (cb) => ipcRenderer.on('updater:downloaded', ()             => cb()),
-    onError:      (cb) => ipcRenderer.on('updater:error',      (_e, msg)      => cb(msg)),
+    onAvailable: (cb) => {
+      const handler = (_e, info) => cb(info)
+      ipcRenderer.on('updater:available', handler)
+      return () => ipcRenderer.removeListener('updater:available', handler)
+    },
+    onProgress: (cb) => {
+      const handler = (_e, progress) => cb(progress)
+      ipcRenderer.on('updater:progress', handler)
+      return () => ipcRenderer.removeListener('updater:progress', handler)
+    },
+    onDownloaded: (cb) => {
+      const handler = () => cb()
+      ipcRenderer.on('updater:downloaded', handler)
+      return () => ipcRenderer.removeListener('updater:downloaded', handler)
+    },
+    onError: (cb) => {
+      const handler = (_e, msg) => cb(msg)
+      ipcRenderer.on('updater:error', handler)
+      return () => ipcRenderer.removeListener('updater:error', handler)
+    },
     download: () => ipcRenderer.invoke('updater:download'),
     install:  () => ipcRenderer.invoke('updater:install'),
     check:    () => ipcRenderer.invoke('updater:check'),

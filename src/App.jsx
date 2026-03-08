@@ -7,13 +7,16 @@ import { smartRepair, buildSystemPrompt, checkTopicRelevance, CASE_TOKEN_LIMIT }
 import DiagCard                             from "./components/DiagCard.jsx";
 import InputForm, { FollowUpPrompt }        from "./components/InputForm.jsx";
 import { ApiKeyScreen, SettingsPanel, ConsentScreen } from "./components/Auth.jsx";
+import ErrorBoundary                        from "./components/ErrorBoundary.jsx";
+import ConfirmModal                         from "./components/ConfirmModal.jsx";
+import useCases                             from "./hooks/useCases.js";
+import useAutoUpdater                       from "./hooks/useAutoUpdater.js";
 
 // ── Storage wrapper ───────────────────────────────────────────────────────────
 const store = {
   get: (key)        => window.electronAPI.storage.get(key),
   set: (key, value) => window.electronAPI.storage.set(key, value),
 };
-const SESSIONS_KEY = "gearbrain_sessions";
 
 // ── Globální styly ────────────────────────────────────────────────────────────
 function GlobalStyles({ t, darkMode }) {
@@ -47,6 +50,13 @@ function StatusBadge({ status, t }) {
 
 // ── Modal overlay ─────────────────────────────────────────────────────────────
 function Modal({ onClose, children, width = 480 }) {
+  // Escape key closes modal
+  useEffect(() => {
+    const handler = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ width, maxWidth: "92vw" }}>
@@ -57,7 +67,7 @@ function Modal({ onClose, children, width = 480 }) {
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
-export default function App() {
+function App() {
   const [darkMode, setDarkMode] = useState(true);
   const t = darkMode ? DARK : LIGHT;
 
@@ -66,10 +76,7 @@ export default function App() {
   const [hasConsent,   setHasConsent]   = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
-  const [cases,      setCases]      = useState([]);
-  const [activeId,   setActiveId]   = useState(null);
   const [view,       setView]       = useState("welcome");
-
   const [loading,    setLoading]    = useState(false);
   const [error,      setError]      = useState(null);
   const [closeModal, setCloseModal] = useState(false);
@@ -78,93 +85,64 @@ export default function App() {
   const [deleteId,   setDeleteId]   = useState(null);
   const [newVehicle, setNewVehicle] = useState(EMPTY_VEHICLE);
 
-  const [installationId,  setInstallationId]   = useState("");         // UUID této instalace
-  const [cloudStatus,     setCloudStatus]      = useState("idle");   // "idle"|"ok"|"error" — stav posledního RAG dotazu
+  const [installationId,  setInstallationId]   = useState("");
+  const [cloudStatus,     setCloudStatus]      = useState("idle");
 
-  // ── Auto-updater ──────────────────────────────────────────────────────────────
-  const [updateInfo,     setUpdateInfo]     = useState(null);   // { version, releaseDate }
-  const [updatePhase,    setUpdatePhase]    = useState("idle"); // idle|available|downloading|ready
-  const [updateProgress, setUpdateProgress] = useState(0);      // 0–100
+  // ── Extracted hooks ─────────────────────────────────────────────────────────
+  const {
+    cases, activeCase, activeId, setActiveId,
+    casesRef, updateCase, updateCases, createCase,
+    deleteCase: deleteCaseFromStore, loadCases,
+  } = useCases();
+
+  const { updateInfo, updatePhase, setUpdatePhase, updateProgress } = useAutoUpdater(setError);
 
   const chatEndRef = useRef(null);
-  const casesRef   = useRef(cases);
-  useEffect(() => { casesRef.current = cases; }, [cases]);
 
-  const activeCase  = cases.find((c) => c.id === activeId) ?? null;
   const closedCount = cases.filter((c) => c.status === "uzavřený").length;
   const diagCount   = activeCase?.messages.filter((m) => m.type === "diagnosis").length ?? 0;
 
   // ── Init ────────────────────────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
-      const [apiKey, saved, consent] = await Promise.all([
+      const [apiKey, consent] = await Promise.all([
         window.electronAPI.apiKey.get(),
-        store.get(SESSIONS_KEY),
         store.get("gearbrain_consent"),
       ]);
       setHasApiKey(!!apiKey);
       setHasConsent(!!consent);
-      if (saved) { try { setCases(JSON.parse(saved)); } catch (_) {} }
+      await loadCases();
       const cfg = await window.electronAPI.cloud.configGet();
       if (cfg.installationId) setInstallationId(cfg.installationId);
-
-      // Cloud je nakonfigurovaný → zobrazíme ok ihned
-      // (testConnection volá REST endpoint který má zakázaný anon SELECT)
-      // Reálný stav se ověří při první diagnostice přes Edge Function
       if (cfg.enabled) setCloudStatus('ok');
-
       setAppReady(true);
-
-      // Posloucháme události auto-updateru
-      window.electronAPI.updater.onAvailable((info) => {
-        setUpdateInfo(info);
-        setUpdatePhase("available");
-      });
-      window.electronAPI.updater.onProgress(({ percent }) => {
-        setUpdateProgress(percent);
-        setUpdatePhase("downloading");
-      });
-      window.electronAPI.updater.onDownloaded(() => {
-        setUpdateProgress(100);
-        setUpdatePhase("ready");
-      });
-      window.electronAPI.updater.onError((msg) => {
-        setUpdatePhase("idle");
-        setError("Chyba aktualizace: " + msg);
-      });
     })();
-  }, []);
+  }, [loadCases]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [activeCase?.messages?.length, loading]);
 
-  // ── Persistence ─────────────────────────────────────────────────────────────
-  const saveCases = useCallback((list) => store.set(SESSIONS_KEY, JSON.stringify(list)), []);
-
-  const updateCases = useCallback((updater) => {
-    setCases((prev) => {
-      const next = typeof updater === "function" ? updater(prev) : updater;
-      saveCases(next);
-      return next;
-    });
-  }, [saveCases]);
-
-  const updateCase = useCallback((id, fn) => {
-    updateCases((prev) => prev.map((c) => c.id === id ? { ...c, ...fn(c) } : c));
-  }, [updateCases]);
+  // ── Global keyboard shortcuts ─────────────────────────────────────────────
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.ctrlKey && e.key === "n") {
+        e.preventDefault();
+        setView("new");
+        setActiveId(null);
+        setError(null);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [setActiveId]);
 
   // ── Akce ────────────────────────────────────────────────────────────────────
-  const createCase = useCallback((vehicle) => {
-    const id   = uid();
-    const name = vehicle.model
-      ? vehicle.model.split(" ").slice(0, 3).join(" ") + (vehicle.mileage ? ` · ${fmtMileage(vehicle.mileage)}` : "")
-      : "Nový případ";
-    updateCases((prev) => [{ id, name, status: "rozpracovaný", createdAt: new Date().toISOString(), closedAt: null, vehicle, messages: [], resolution: null, tokenCount: 0 }, ...prev]);
-    setActiveId(id);
+  const handleCreateCase = useCallback((vehicle) => {
+    const id = createCase(vehicle);
     setView("session");
     return id;
-  }, [updateCases]);
+  }, [createCase]);
 
   const runDiag = useCallback(async (caseId, inputData) => {
     setLoading(true);
@@ -213,14 +191,13 @@ export default function App() {
       }
     }
 
-    // RAG + Claude API běží paralelně — RAG výsledky se vloží do promptu jakmile jsou k dispozici
+    // RAG + Claude API
     let similar = [];
     const ragPromise = window.electronAPI.cloud.searchCases(ragInput, installationId)
       .then(({ cases }) => { similar = cases ?? []; setCloudStatus("ok"); })
       .catch(() => { setCloudStatus("error"); });
 
     try {
-      // Počkáme na RAG (většinou doběhne dřív než bychom promptem sestavili)
       await ragPromise;
       const data   = await window.electronAPI.callClaude({ systemPrompt: buildSystemPrompt(similar, vehicle), userMessage: userPrompt, maxTokens: 4000 });
       const raw    = data.content.map((b) => b.text ?? "").join("");
@@ -229,7 +206,6 @@ export default function App() {
       if (!parsed)                throw new Error("AI nevrátilo čitelný výsledek. Zkuste přidat více příznaků.");
       if (!parsed.závady?.length) throw new Error("Nebyly nalezeny odpovídající závady.");
 
-      // Přičíst tokeny z API odpovědi (Anthropic vrací přesné hodnoty)
       const usedTokens = (data.usage?.input_tokens ?? 0) + (data.usage?.output_tokens ?? 0);
 
       const diagMsg = { id: uid(), type: "diagnosis", result: parsed, ragMatchIds: similar.map((s) => s.id), tokensUsed: usedTokens, timestamp: new Date().toISOString() };
@@ -251,38 +227,26 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [updateCase, installationId]);
+  }, [updateCase, installationId, casesRef]);
 
   const handleNewCase = useCallback((inputData) => {
-    const id = createCase(newVehicle);
+    const id = handleCreateCase(newVehicle);
     runDiag(id, inputData);
     setNewVehicle(EMPTY_VEHICLE);
-  }, [createCase, runDiag, newVehicle]);
+  }, [handleCreateCase, runDiag, newVehicle]);
 
-  const closeCase = useCallback(() => {
-    if (!resolution.trim()) return;
-    const resText     = resolution.trim();
+  const closeCase = useCallback(async () => {
+    const resText = resolution.trim();
+    if (!resText) return;
+
+    // Sdílená validace přes IPC — stejná logika jako v cloud.js
+    const validation = await window.electronAPI.validateResolution(resText);
+    if (!validation.ok) {
+      setCloseError(validation.reason);
+      return;
+    }
+
     const currentCase = casesRef.current.find((c) => c.id === activeId);
-
-    // Validace přímo v UI — uživatel vidí chybu okamžitě, žádné tiché blokování
-    if (resText.length < 10) {
-      setCloseError(`Popis opravy je příliš krátký (${resText.length} znaků, minimum 10).`);
-      return;
-    }
-    if (resText.length > 200) {
-      setCloseError(`Popis opravy je příliš dlouhý (${resText.length} znaků, maximum 200).`);
-      return;
-    }
-    if (/(.)\1{6,}/.test(resText)) {
-      setCloseError("Popis opravy obsahuje opakující se znaky.");
-      return;
-    }
-    const uniqueWords = new Set(resText.toLowerCase().split(/\s+/).filter(w => w.length > 2));
-    if (uniqueWords.size < 2) {
-      setCloseError("Popis opravy je příliš stručný — přidejte alespoň 2 různá slova.");
-      return;
-    }
-
     const closedAt = new Date().toISOString();
     updateCase(activeId, () => ({ status: "uzavřený", closedAt, resolution: resText }));
 
@@ -290,27 +254,33 @@ export default function App() {
       const fullCase = { ...currentCase, status: "uzavřený", closedAt, resolution: resText };
       window.electronAPI.cloud.push(fullCase)
         .then((result) => {
-          if (!result.ok) console.warn('[cloud push]', result.error);
+          if (!result.ok) {
+            console.warn('[cloud push]', result.error);
+            setCloudStatus("error");
+          }
         })
-        .catch((e) => console.warn('[cloud push]', e.message));
+        .catch((e) => {
+          console.warn('[cloud push]', e.message);
+          setCloudStatus("error");
+        });
     }
 
     setCloseModal(false);
     setCloseError(null);
     setResolution("");
-  }, [activeId, resolution, updateCase]);
+  }, [activeId, resolution, updateCase, casesRef]);
 
-  const deleteCase = useCallback((id) => {
-    updateCases((prev) => prev.filter((c) => c.id !== id));
-    if (activeId === id) { setActiveId(null); setView("welcome"); }
+  const handleDeleteCase = useCallback((id) => {
+    deleteCaseFromStore(id);
+    if (activeId === id) setView("welcome");
     setDeleteId(null);
-  }, [activeId, updateCases]);
+  }, [activeId, deleteCaseFromStore]);
 
   const openCase = useCallback((id) => {
     setActiveId(id);
     setView("session");
     setError(null);
-  }, []);
+  }, [setActiveId]);
 
   // ── Loading / API Key screens ────────────────────────────────────────────────
   if (!appReady) {
@@ -350,7 +320,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* Pravá část — sjednocená výška a font */}
+        {/* Pravá část */}
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: "0.75rem", color: t.textFaint }}>
             {cases.length} případů
@@ -418,14 +388,17 @@ export default function App() {
                   style={{ background: "none", border: `1px solid ${t.border}`, color: t.textFaint, padding: "4px 12px", fontSize: "0.72rem", cursor: "pointer", fontFamily: "inherit", borderRadius: 2 }}>
                   Později
                 </button>
-                <button onClick={() => window.electronAPI.updater.download()}
+                <button onClick={() => {
+                    setUpdatePhase("downloading");
+                    window.electronAPI.updater.download().catch(() => setUpdatePhase("available"));
+                  }}
                   style={{ background: "#3b82f6", color: "#fff", border: "none", padding: "4px 14px", fontSize: "0.72rem", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", borderRadius: 2 }}>
                   ↓ Stáhnout
                 </button>
               </>
             )}
             {updatePhase === "ready" && (
-              <button onClick={() => window.electronAPI.updater.install()}
+              <button onClick={() => { setUpdatePhase("idle"); window.electronAPI.updater.install(); }}
                 style={{ background: t.doneStatusColor, color: "#fff", border: "none", padding: "4px 14px", fontSize: "0.72rem", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", borderRadius: 2 }}>
                 ↺ Restartovat a nainstalovat
               </button>
@@ -470,12 +443,9 @@ export default function App() {
           </div>
 
           <div style={{ borderTop: `1px solid ${t.border}`, flexShrink: 0 }}>
-            {/* Lokální databáze */}
             <div style={{ padding: "7px 12px", fontSize: "0.67rem", color: t.textVeryFaint, borderBottom: `1px solid ${t.border}` }}>
               Lokální: {closedCount > 0 ? `${closedCount} uzavřených` : "prázdná"}
             </div>
-
-            {/* Cloud databáze — stav posledního RAG dotazu */}
             <div style={{ padding: "7px 12px", fontSize: "0.67rem", color: cloudStatus === "ok" ? t.doneStatusColor : cloudStatus === "error" ? "#dc2626" : t.textVeryFaint, display: "flex", alignItems: "center", gap: 5 }}>
               {cloudStatus === "ok"    && <><span>●</span><span>Cloud RAG aktivní</span></>}
               {cloudStatus === "error" && <><span>✕</span><span>Cloud nedostupný</span></>}
@@ -550,7 +520,6 @@ export default function App() {
                     {activeCase.vehicle?.model   && <span style={{ fontSize: "0.68rem", color: t.textFaint }}>{activeCase.vehicle.model}</span>}
                     {activeCase.vehicle?.mileage && <span style={{ fontSize: "0.68rem", color: t.textVeryFaint }}>· {fmtMileage(activeCase.vehicle.mileage)}</span>}
                     <StatusBadge status={activeCase.status} t={t} />
-                    {/* Token indikátor */}
                     {activeCase.status === "rozpracovaný" && (() => {
                       const used  = activeCase.tokenCount ?? 0;
                       const pct   = Math.min(100, Math.round(used / CASE_TOKEN_LIMIT * 100));
@@ -590,7 +559,6 @@ export default function App() {
 
                   {activeCase.messages.map((msg, idx) => {
 
-                    // ── Uživatelský vstup — bublina vpravo ──
                     if (msg.type === "input") {
                       const roundNo = activeCase.messages.slice(0, idx + 1).filter((m) => m.type === "input").length;
                       const hasChips = (msg.symptoms?.length > 0) || (msg.obdCodes?.length > 0);
@@ -620,11 +588,9 @@ export default function App() {
                       );
                     }
 
-                    // ── AI diagnostika — bublina vlevo ──
                     if (msg.type === "diagnosis") {
-                      // RAG shody — jen lokální cases (cloudové záznamy se již neukládají lokálně)
-                    const matchIds    = msg.ragMatchIds ?? [];
-                    const ragSessions = cases.filter((c) => matchIds.includes(c.id));
+                      const matchIds    = msg.ragMatchIds ?? [];
+                      const ragSessions = cases.filter((c) => matchIds.includes(c.id));
                       return (
                         <div key={msg.id} style={{ display: "flex", justifyContent: "flex-start" }}>
                           <div style={{ maxWidth: "92%" }}>
@@ -640,7 +606,6 @@ export default function App() {
                     return null;
                   })}
 
-                  {/* Načítání */}
                   {loading && (
                     <div style={{ display: "flex", justifyContent: "flex-start" }}>
                       <div style={{ padding: "16px 20px", background: t.bgMuted, border: `1px solid ${t.border}`, borderLeft: `3px solid ${t.accent}`, borderRadius: "2px 8px 8px 8px" }}>
@@ -650,14 +615,12 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Chyba */}
                   {error && (
                     <div style={{ padding: "10px 14px", background: "rgba(220,38,38,0.08)", border: "1px solid #dc2626", color: "#dc2626", fontSize: "0.82rem", borderRadius: 2 }}>
                       ⚠ {error}
                     </div>
                   )}
 
-                  {/* Uzavřený případ — summary */}
                   {activeCase.status === "uzavřený" && activeCase.resolution && (
                     <div style={{ padding: "14px 16px", background: t.closedBg, border: `1px solid ${t.closedBorder}`, borderLeft: `4px solid ${t.doneStatusColor}`, borderRadius: 2, marginTop: 4 }}>
                       <div style={{ fontSize: "0.68rem", color: t.doneStatusColor, letterSpacing: "0.1em", marginBottom: 6 }}>
@@ -676,13 +639,11 @@ export default function App() {
                 <div style={{ borderTop: `1px solid ${t.border}`, padding: "14px 20px", background: t.bgFollowup, flexShrink: 0 }}>
                   <div style={{ maxWidth: 760, margin: "0 auto" }}>
                     {diagCount === 0 ? (
-                      // První diagnostika — plný formulář s příznaky + OBD
                       <>
                         <div style={{ fontSize: "0.68rem", color: t.textVeryFaint, letterSpacing: "0.08em", marginBottom: 10 }}>PRVNÍ DIAGNOSTIKA — zadejte příznaky</div>
                         <InputForm onSubmit={(d) => runDiag(activeId, d)} loading={loading} label="SPUSTIT DIAGNOSTIKU" t={t} />
                       </>
                     ) : (
-                      // Pokračování — jednoduchý prompt
                       <>
                         <div style={{ fontSize: "0.68rem", color: t.textVeryFaint, letterSpacing: "0.08em", marginBottom: 10 }}>DOPLNIT INFORMACE</div>
                         <FollowUpPrompt onSubmit={(d) => runDiag(activeId, d)} loading={loading} t={t} />
@@ -698,7 +659,7 @@ export default function App() {
 
       {/* ── Nastavení ── */}
       {showSettings && (
-        <SettingsPanel t={t} onClose={() => setShowSettings(false)} onKeyDeleted={() => { setShowSettings(false); setHasApiKey(false); }} />
+        <SettingsPanel t={t} onClose={() => setShowSettings(false)} onKeyDeleted={() => { setShowSettings(false); setHasApiKey(false); }} onCloudConfigSaved={() => setCloudStatus('ok')} />
       )}
 
       {/* ── MODAL: Uzavřít případ ── */}
@@ -732,32 +693,31 @@ export default function App() {
         </Modal>
       )}
 
-      {/* ── MODAL: Smazat případ ── */}
+      {/* ── MODAL: Smazat případ — ConfirmModal ── */}
       {deleteId && (
-        <Modal onClose={() => setDeleteId(null)} width={380}>
-          <div style={{ background: t.bgModal, border: `1px solid ${t.border}`, borderRadius: 4, padding: "26px", boxShadow: "0 20px 60px rgba(0,0,0,0.35)" }}>
-            <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontSize: "1.3rem", fontWeight: 700, color: "#dc2626", marginBottom: 10 }}>SMAZAT PŘÍPAD</div>
-            <p style={{ fontSize: "0.85rem", color: t.textMuted, marginBottom: 18, lineHeight: 1.6 }}>
-              Opravdu smazat tento případ? Akce je nevratná.
-              {cases.find((c) => c.id === deleteId)?.status === "uzavřený" && (
-                <span style={{ display: "block", color: "#d97706", marginTop: 8, fontSize: "0.8rem" }}>
-                  ⚠ Případ je uzavřen a je součástí databáze servisu.
-                </span>
-              )}
-            </p>
-            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-              <button onClick={() => setDeleteId(null)}
-                style={{ background: "transparent", border: `1px solid ${t.border}`, color: t.textFaint, padding: "8px 20px", fontSize: "0.82rem", cursor: "pointer", fontFamily: "inherit", borderRadius: 2 }}>
-                Zrušit
-              </button>
-              <button onClick={() => deleteCase(deleteId)}
-                style={{ background: "rgba(220,38,38,0.1)", border: "1px solid #dc2626", color: "#dc2626", padding: "8px 20px", fontSize: "0.82rem", cursor: "pointer", fontFamily: "inherit", borderRadius: 2 }}>
-                ✕ Smazat
-              </button>
-            </div>
-          </div>
-        </Modal>
+        <ConfirmModal
+          t={t}
+          title="SMAZAT PŘÍPAD"
+          message={
+            cases.find((c) => c.id === deleteId)?.status === "uzavřený"
+              ? "Opravdu smazat tento případ? Akce je nevratná.\n⚠ Případ je uzavřen a je součástí databáze servisu."
+              : "Opravdu smazat tento případ? Akce je nevratná."
+          }
+          confirmLabel="✕ Smazat"
+          danger
+          onConfirm={() => handleDeleteCase(deleteId)}
+          onCancel={() => setDeleteId(null)}
+        />
       )}
     </div>
+  );
+}
+
+// ── Export s ErrorBoundary ───────────────────────────────────────────────────
+export default function WrappedApp() {
+  return (
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   );
 }
