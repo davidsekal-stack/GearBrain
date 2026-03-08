@@ -1,6 +1,6 @@
 {
   "name": "gearbrain",
-  "version": "1.2.0",
+  "version": "1.2.3",
   "description": "AI Diagnostika – Ford Transit EU",
   "main": "electron/main/index.js",
   "scripts": {
