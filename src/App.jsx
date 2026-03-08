@@ -254,7 +254,9 @@ function App() {
       const fullCase = { ...currentCase, status: "uzavřený", closedAt, resolution: resText };
       window.electronAPI.cloud.push(fullCase)
         .then((result) => {
-          if (!result.ok) {
+          if (result.ok) {
+            setCloudStatus("ok");
+          } else {
             console.warn('[cloud push]', result.error);
             setCloudStatus("error");
           }
