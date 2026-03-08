@@ -85,14 +85,15 @@ function validateCase(kase) {
   if (!resVal.ok) return resVal
 
   // ── Diagnostické signály ────────────────────────────────────────────────────
-  // Alespoň jeden z: OBD kód, příznak, nebo manuální popis (≥10 znaků)
+  // Alespoň jeden z: OBD kód, příznak, nebo manuální popis (≥20 znaků)
+  // Odpovídá CHECK constraint chk_has_diagnostic_signal v Supabase
 
   const hasObd      = obdCodes.length > 0
   const hasSymptom  = symptoms.length > 0
-  const hasDesc     = description.length >= 10
+  const hasDesc     = description.length >= 20
 
   if (!hasObd && !hasSymptom && !hasDesc) {
-    return { ok: false, reason: 'Případ musí obsahovat OBD kód, příznak nebo popis problému (alespoň 10 znaků).' }
+    return { ok: false, reason: 'Případ musí obsahovat OBD kód, příznak nebo popis problému (alespoň 20 znaků).' }
   }
 
   // ── Formát OBD kódů ─────────────────────────────────────────────────────────
@@ -181,19 +182,24 @@ async function pushCase(supabaseUrl, anonKey, installationId, kase) {
     const row = caseToRow(kase, installationId)
     await supabaseRequest(
       'POST', supabaseUrl, anonKey,
-      '/rest/v1/gearbrain_cases?on_conflict=installation_id,local_id',
+      '/rest/v1/gearbrain_cases',
       row,
       8000,
-      { 'Prefer': 'return=minimal,resolution=ignore-duplicates' }
+      { 'Prefer': 'return=minimal' }
     )
     return { ok: true, error: null }
   } catch (e) {
+    // Duplikát (unique constraint) — data už v DB existují, to je OK
+    if (e.message.includes('duplicate') || e.message.includes('23505')) {
+      return { ok: true, error: null }
+    }
     return { ok: false, error: e.message }
   }
 }
 
 /**
  * Otestuje spojení se Supabase (HEAD + Content-Range pro počet).
+ * Při HTTP chybě vrátí podrobnou informaci pro diagnostiku.
  */
 async function testConnection(supabaseUrl, anonKey) {
   return new Promise((resolve) => {
@@ -213,13 +219,24 @@ async function testConnection(supabaseUrl, anonKey) {
       const match = range.match(/\/(\d+)$/)
       const count = match ? parseInt(match[1], 10) : null
       if (res.statusCode >= 400) {
-        resolve({ ok: false, count: null, error: `HTTP ${res.statusCode}` })
+        const hints = {
+          401: 'Neplatný anon klíč',
+          403: 'Přístup zamítnut — zkontrolujte RLS policies',
+          404: 'Tabulka gearbrain_cases neexistuje',
+          500: 'Interní chyba Supabase serveru',
+          503: 'Supabase projekt je pravděpodobně pozastaven (paused)',
+        }
+        const hint = hints[res.statusCode] || ''
+        resolve({ ok: false, count: null, error: `HTTP ${res.statusCode}${hint ? ' — ' + hint : ''}` })
       } else {
         resolve({ ok: true, count, error: null })
       }
     })
-    req.on('error', e => resolve({ ok: false, count: null, error: e.message }))
-    req.setTimeout(6000, () => { req.destroy(); resolve({ ok: false, count: null, error: 'Timeout' }) })
+    req.on('error', e => {
+      const isNetErr = e.code === 'ENOTFOUND' || e.code === 'ECONNREFUSED'
+      resolve({ ok: false, count: null, error: isNetErr ? `Nelze se připojit k ${url.hostname}` : e.message })
+    })
+    req.setTimeout(6000, () => { req.destroy(); resolve({ ok: false, count: null, error: 'Timeout (6s) — server neodpovídá' }) })
     req.end()
   })
 }

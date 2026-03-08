@@ -87,19 +87,19 @@ test('Jen příznak (bez OBD a popisu) → projde', () => {
   assert(validateCase(c).ok)
 })
 
-test('Jen popis ≥10 znaků (bez OBD a příznaku) → projde', () => {
+test('Jen popis ≥20 znaků (bez OBD a příznaku) → projde', () => {
   const c = mkCase()
   c.messages[0].obdCodes = []
   c.messages[0].symptoms = []
-  c.messages[0].text = 'Nouzový režim.'  // 15 znaků — projde
+  c.messages[0].text = 'Motor se přehřívá za jízdy'  // 26 znaků — projde
   assert(validateCase(c).ok)
 })
 
-test('Popis <10 znaků bez OBD a příznaku → zamítnuto', () => {
+test('Popis 15 znaků bez OBD a příznaku → zamítnuto (min 20)', () => {
   const c = mkCase()
   c.messages[0].obdCodes = []
   c.messages[0].symptoms = []
-  c.messages[0].text = 'Závada.'  // 7 znaků — zamítnuto
+  c.messages[0].text = 'Nouzový režim.'  // 15 znaků — zamítnuto (< 20)
   assert(!validateCase(c).ok)
 })
 
