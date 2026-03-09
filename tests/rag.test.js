@@ -40,35 +40,51 @@ async function run() {
   // ── computeSimilarity ──────────────────────────────────────────────────────
   console.log('\n── computeSimilarity ────────────────────────────────────────────')
 
-  test('Plná shoda (brand+model+OBD+2 příznaky) = 2+3+4+3 = 12', () => {
+  test('Plná shoda (model+OBD+2 příznaky) = 3+4+3 = 10', () => {
     const c = mkCase('Transit 2.2 TDCi (2006–2014)', ['P0401'], ['Ztráta výkonu', 'Černý kouř'])
-    assert.strictEqual(computeSimilarity(c, INPUT), 12)
+    assert.strictEqual(computeSimilarity(c, INPUT), 10)
   })
 
-  test('Jen OBD kód (brand+OBD) = 2+4 = 6', () => {
+  test('Jen OBD kód = 4', () => {
     const c = mkCase('', ['P0401'], [])
-    assert.strictEqual(computeSimilarity(c, INPUT), 6)
+    assert.strictEqual(computeSimilarity(c, INPUT), 4)
   })
 
-  test('Jen model (brand+model) = 2+3 = 5', () => {
+  test('Jen model = 3', () => {
     const c = mkCase('Transit 2.2 TDCi (2006–2014)', [], [])
-    assert.strictEqual(computeSimilarity(c, INPUT), 5)
+    assert.strictEqual(computeSimilarity(c, INPUT), 3)
   })
 
-  test('Jen příznak (brand+příznak) = 2+1.5 = 3.5', () => {
+  test('Jen příznak = 1.5', () => {
     const c = mkCase('', [], ['Ztráta výkonu'])
-    assert.strictEqual(computeSimilarity(c, INPUT), 3.5)
+    assert.strictEqual(computeSimilarity(c, INPUT), 1.5)
   })
 
-  test('Žádná shoda (jiný model+OBD+příznaky) = brand = 2', () => {
+  test('Žádná shoda (jiný model+OBD+příznaky) = 0', () => {
     const c = mkCase('Sprinter 316 CDI', ['P0087'], ['Přehřívání'])
-    assert.strictEqual(computeSimilarity(c, INPUT), 2)
+    assert.strictEqual(computeSimilarity(c, INPUT), 0)
   })
 
-  test('Dva OBD kódy (brand+2×OBD) = 2+4+4 = 10', () => {
+  test('Dva OBD kódy (2×OBD) = 4+4 = 8', () => {
     const input2 = { ...INPUT, obdCodes: ['P0401', 'P0403'] }
     const c = mkCase('', ['P0401', 'P0403'], [])
-    assert.strictEqual(computeSimilarity(c, input2), 10)
+    assert.strictEqual(computeSimilarity(c, input2), 8)
+  })
+
+  test('Shoda výkonu motoru přidává +2 body', () => {
+    const c = mkCase('Transit MK7 2.2 TDCi (2006–2011)', [], [])
+    c.vehicle.enginePower = '96 kW (130 k)'
+    const inputPower = { ...INPUT, vehicle: { brand: 'Ford', model: 'Transit MK7 2.2 TDCi (2006–2011)', enginePower: '96 kW (130 k)' } }
+    // model(3) + power(2) = 5
+    assert.strictEqual(computeSimilarity(c, inputPower), 5)
+  })
+
+  test('Neshoda výkonu nedává bonus', () => {
+    const c = mkCase('Transit MK7 2.2 TDCi (2006–2011)', [], [])
+    c.vehicle.enginePower = '81 kW (110 k)'
+    const inputPower = { ...INPUT, vehicle: { brand: 'Ford', model: 'Transit MK7 2.2 TDCi (2006–2011)', enginePower: '96 kW (130 k)' } }
+    // model(3) + power(0) = 3
+    assert.strictEqual(computeSimilarity(c, inputPower), 3)
   })
 
   test('Text skóre je omezeno na max 2 (i při 30+ shodách)', () => {
@@ -76,8 +92,8 @@ async function run() {
     const input3 = { ...INPUT, text: words.join(' ') }
     const c = mkCase('', [], [], words.join(' '))
     const score = computeSimilarity(c, input3)
-    // brand(2) + textScore(max 2) = 4
-    assert(score <= 4, `Skóre ${score} překračuje maximum brand(2)+text(2)=4`)
+    // textScore(max 2) = 2
+    assert(score <= 2, `Skóre ${score} překračuje maximum text(2)=2`)
   })
 
   // ── extractSignals ─────────────────────────────────────────────────────────

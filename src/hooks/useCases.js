@@ -35,7 +35,9 @@ export default function useCases() {
   const createCase = useCallback((vehicle) => {
     const id = uid();
     const name = vehicle.model
-      ? vehicle.model.split(" ").slice(0, 3).join(" ") + (vehicle.mileage ? ` · ${Number(vehicle.mileage).toLocaleString("cs-CZ")} km` : "")
+      ? vehicle.model.split(" ").slice(0, 3).join(" ")
+        + (vehicle.enginePower ? ` · ${vehicle.enginePower.split(" ")[0]} kW` : "")
+        + (vehicle.mileage ? ` · ${Number(vehicle.mileage).toLocaleString("cs-CZ")} km` : "")
       : "Nový případ";
     updateCases((prev) => [{ id, name, status: "rozpracovaný", createdAt: new Date().toISOString(), closedAt: null, vehicle, messages: [], resolution: null, tokenCount: 0 }, ...prev]);
     setActiveId(id);

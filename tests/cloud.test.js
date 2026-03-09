@@ -43,9 +43,10 @@ const FULL_CASE = {
   closedAt:   '2025-01-16T14:30:00Z',
   resolution: 'Vyměněn EGR ventil, kód P0401 vymazán.',
   vehicle: {
-    brand:   'Ford',
-    model:   'Transit 2.2 TDCi (2006–2014)',
-    mileage: '185000',
+    brand:       'Ford',
+    model:       'Transit MK7 2.2 TDCi (2006–2011)',
+    mileage:     '185000',
+    enginePower: '96 kW (130 k)',
   },
   messages: [
     {
@@ -79,7 +80,7 @@ const MINIMAL_CASE = {
   createdAt:  '2025-02-01T08:00:00Z',
   closedAt:   '2025-02-01T09:00:00Z',
   resolution: 'Vyměněn filtr DPF.',
-  vehicle:    { brand: '', model: '', mileage: '' },
+  vehicle:    { brand: '', model: '', mileage: '', enginePower: '' },
   messages:   [],
 }
 
@@ -92,10 +93,11 @@ test('Extrahuje installation_id', () => {
   eq(row.installation_id, INSTALL_ID)
 })
 
-test('Extrahuje vehicle_model a vehicle_brand', () => {
+test('Extrahuje vehicle_model, vehicle_brand a engine_power', () => {
   const row = caseToRow(FULL_CASE, INSTALL_ID)
   eq(row.vehicle_brand, 'Ford')
-  eq(row.vehicle_model, 'Transit 2.2 TDCi (2006–2014)')
+  eq(row.vehicle_model, 'Transit MK7 2.2 TDCi (2006–2011)')
+  eq(row.engine_power, '96 kW (130 k)')
 })
 
 test('Převede mileage na integer', () => {
@@ -154,6 +156,11 @@ test('Minimální případ — null pro mileage při prázdném stringu', () => 
   eq(row.mileage, null)
 })
 
+test('Minimální případ — null pro engine_power při prázdném stringu', () => {
+  const row = caseToRow(MINIMAL_CASE, INSTALL_ID)
+  eq(row.engine_power, null)
+})
+
 test('Minimální případ — null pro description při žádném textu', () => {
   const row = caseToRow(MINIMAL_CASE, INSTALL_ID)
   eq(row.description, null)
@@ -178,8 +185,9 @@ const SUPABASE_ROW = {
   id:            'uuid-cloud-1',
   installation_id: 'uuid-install-99',
   vehicle_brand: 'Ford',
-  vehicle_model: 'Transit 2.2 TDCi (2006–2014)',
+  vehicle_model: 'Transit MK7 2.2 TDCi (2006–2011)',
   mileage:       210000,
+  engine_power:  '96 kW (130 k)',
   symptoms:      ['Ztráta výkonu', 'Černý kouř'],
   obd_codes:     ['P0401'],
   description:   'Přešel do nouzového režimu.',
@@ -225,8 +233,9 @@ test('Input zpráva obsahuje description jako text', () => {
 test('vehicle objekt správně namapován', () => {
   const c = rowToCase(SUPABASE_ROW)
   eq(c.vehicle.brand, 'Ford')
-  eq(c.vehicle.model, 'Transit 2.2 TDCi (2006–2014)')
+  eq(c.vehicle.model, 'Transit MK7 2.2 TDCi (2006–2011)')
   eq(c.vehicle.mileage, '210000')
+  eq(c.vehicle.enginePower, '96 kW (130 k)')
 })
 
 test('resolution zachována', () => {

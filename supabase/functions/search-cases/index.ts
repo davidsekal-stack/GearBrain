@@ -14,8 +14,9 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
 // ── Scoring konstanty (shodné s src/lib/rag.js) ───────────────────────────────
-const OWN_THRESHOLD   = 6
-const OTHER_THRESHOLD = 10
+// Značka vozidla se nepoužívá ke scoringu — slouží jako pre-filtr na DB úrovni
+const OWN_THRESHOLD   = 5
+const OTHER_THRESHOLD = 8
 const MAX_TEXT_SCORE  = 2
 
 function computeSimilarity(row: any, input: any): number {
@@ -27,8 +28,9 @@ function computeSimilarity(row: any, input: any): number {
 
   let score = 0
 
-  if (input.vehicle?.brand && row.vehicle_brand === input.vehicle.brand) score += 2
+  // Značka se nepoužívá ke scoringu — slouží jako pre-filtr na DB úrovni
   if (input.vehicle?.model && row.vehicle_model === input.vehicle.model) score += 3
+  if (input.vehicle?.enginePower && row.engine_power === input.vehicle.enginePower) score += 2
 
   for (const code of input.obdCodes ?? []) {
     if (allText.includes(code.toLowerCase())) score += 4
@@ -61,9 +63,10 @@ function rowToCase(row: any) {
     fromCloud:      true,
     installationId: row.installation_id,
     vehicle: {
-      brand:   row.vehicle_brand  || '',
-      model:   row.vehicle_model  || '',
-      mileage: row.mileage?.toString() || '',
+      brand:       row.vehicle_brand  || '',
+      model:       row.vehicle_model  || '',
+      mileage:     row.mileage?.toString() || '',
+      enginePower: row.engine_power   || '',
     },
     messages: [{
       id:        row.id + '_input',
@@ -99,13 +102,19 @@ Deno.serve(async (req) => {
       { auth: { persistSession: false } }
     )
 
-    // Předfiltrování na DB úrovni — kandidáti podle OBD kódů nebo modelu
+    // Předfiltrování na DB úrovni:
+    // 1) Značka jako base filtr — prohledáváme pouze záznamy stejné značky
+    // 2) OBD kódy nebo model jako sekundární filtr
     // (max 200 kandidátů, scoring proběhne zde)
     let query = supabase
       .from('gearbrain_cases')
       .select('*')
       .order('closed_at', { ascending: false })
       .limit(200)
+
+    if (vehicle?.brand) {
+      query = query.eq('vehicle_brand', vehicle.brand)
+    }
 
     if (obdCodes?.length > 0) {
       query = query.overlaps('obd_codes', obdCodes)
