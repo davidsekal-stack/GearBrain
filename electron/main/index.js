@@ -11,8 +11,10 @@ const { autoUpdater } = require('electron-updater')
 // ── Persistent storage ────────────────────────────────────────────────────────
 const store = new Store({ name: 'gearbrain-data', encryptionKey: 'td-2025-secure' })
 
-const DEFAULT_MODEL = 'claude-sonnet-4-6'
-const isDev         = process.env.NODE_ENV === 'development' || !app.isPackaged
+const DEFAULT_MODEL   = 'claude-sonnet-4-6'
+const SUPABASE_URL    = 'https://nmvjthfezyjcwuzphiuu.supabase.co'
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5tdmp0aGZlenlqY3d1enBoaXV1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI3MzcwNTAsImV4cCI6MjA4ODMxMzA1MH0.acMPCJe2asOToPXg6DQccejtLOUbD8EMx9Z9FqWo_xo'
+const isDev           = process.env.NODE_ENV === 'development' || !app.isPackaged
 const VITE_DEV_URL  = 'http://localhost:5173'
 
 // ── Window ────────────────────────────────────────────────────────────────────
@@ -121,32 +123,29 @@ ipcMain.handle('storage:get',    (_e, k)    => store.get(k, null))
 ipcMain.handle('storage:set',    (_e, k, v) => { store.set(k, v); return true })
 ipcMain.handle('storage:delete', (_e, k)    => { store.delete(k); return true })
 
-// ── IPC: API klíč ─────────────────────────────────────────────────────────────
-ipcMain.handle('apikey:get',    ()      => store.get('anthropic_api_key', null))
-ipcMain.handle('apikey:set',    (_e, k) => { store.set('anthropic_api_key', k); return true })
-ipcMain.handle('apikey:delete', ()      => { store.delete('anthropic_api_key'); return true })
-
 // ── IPC: AI model ─────────────────────────────────────────────────────────────
 ipcMain.handle('model:get', ()      => store.get('anthropic_model', DEFAULT_MODEL))
 ipcMain.handle('model:set', (_e, m) => { store.set('anthropic_model', m); return true })
 
-// ── IPC: Anthropic API ────────────────────────────────────────────────────────
+// ── IPC: AI Proxy (Supabase Edge Function) ──────────────────────────────────
 let activeClaudeReq = null
 
 ipcMain.handle('claude:call', (_e, { systemPrompt, userMessage, maxTokens = 4000 }) => {
   return new Promise((resolve, reject) => {
-    const apiKey = store.get('anthropic_api_key')
-    if (!apiKey) { reject(new Error('API klíč není nastaven.')); return }
     const model = store.get('anthropic_model', DEFAULT_MODEL)
     const body  = JSON.stringify({
       model, max_tokens: maxTokens, system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }],
+      installation_id: getInstallationId(),
     })
+    const url = new URL('/functions/v1/anthropic-proxy', SUPABASE_URL)
     const req = https.request({
-      hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
+      hostname: url.hostname, path: url.pathname, method: 'POST',
       headers: {
-        'Content-Type': 'application/json', 'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(body),
+        'Content-Type': 'application/json',
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+        'Content-Length': Buffer.byteLength(body),
       },
     }, (res) => {
       const chunks = []
@@ -158,7 +157,7 @@ ipcMain.handle('claude:call', (_e, { systemPrompt, userMessage, maxTokens = 4000
           const parsed = JSON.parse(data)
           if (parsed.error) reject(new Error(`Anthropic: ${parsed.error.message}`))
           else resolve(parsed)
-        } catch { reject(new Error('Chyba při zpracování odpovědi API.')) }
+        } catch { reject(new Error('Chyba při zpracování odpovědi AI služby.')) }
       })
     })
     activeClaudeReq = req
@@ -180,12 +179,9 @@ ipcMain.handle('claude:abort', () => {
 
 // ── IPC: Cloud (Supabase) ─────────────────────────────────────────────────────
 
-/** Vrátí konfiguraci Supabase (URL + anon klíč), nebo null pokud není nastavena */
+/** Vrátí konfiguraci Supabase (hardcoded — vždy dostupná) */
 function getCloudConfig() {
-  const url = store.get('supabase_url', null)
-  const key = store.get('supabase_anon_key', null)
-  if (!url || !key) return null
-  return { url, key }
+  return { url: SUPABASE_URL, key: SUPABASE_ANON_KEY }
 }
 
 /** Vrátí nebo vygeneruje installation_id (anonymní UUID této instalace) */
@@ -198,39 +194,11 @@ function getInstallationId() {
   return id
 }
 
-/** Nastaví Supabase konfiguraci */
-ipcMain.handle('cloud:config-set', (_e, { url, anonKey }) => {
-  store.set('supabase_url', url.trim().replace(/\/$/, ''))
-  // Prázdný klíč = zachovat stávající (aktualizace jen URL)
-  if (anonKey.trim()) store.set('supabase_anon_key', anonKey.trim())
-  return { ok: true }
-})
-
-/** Vrátí aktuální konfiguraci (maskovaný klíč pro zobrazení) */
-ipcMain.handle('cloud:config-get', () => {
-  const url = store.get('supabase_url', '')
-  const key = store.get('supabase_anon_key', '')
-  return {
-    url,
-    keyMasked: key ? `${key.slice(0, 20)}••••••••${key.slice(-6)}` : '',
-    enabled:   !!(url && key),
-    installationId: getInstallationId(),
-  }
-})
-
-/** Smaže konfiguraci */
-ipcMain.handle('cloud:config-delete', () => {
-  store.delete('supabase_url')
-  store.delete('supabase_anon_key')
-  return { ok: true }
-})
-
-/** Testuje spojení se Supabase */
-ipcMain.handle('cloud:test', async () => {
-  const cfg = getCloudConfig()
-  if (!cfg) return { ok: false, error: 'Supabase není nakonfigurovaný' }
-  return cloud.testConnection(cfg.url, cfg.key)
-})
+/** Vrátí aktuální konfiguraci (vždy připojeno — hardcoded) */
+ipcMain.handle('cloud:config-get', () => ({
+  enabled: true,
+  installationId: getInstallationId(),
+}))
 
 // ── Cloud push s retry frontou ────────────────────────────────────────────────
 const PUSH_QUEUE_KEY = 'gearbrain_push_queue'
