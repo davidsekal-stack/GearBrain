@@ -6,7 +6,7 @@ import { uid, fmtDate, fmtMileage }         from "./lib/utils.js";
 import { smartRepair, buildSystemPrompt, checkTopicRelevance, CASE_TOKEN_LIMIT } from "./lib/ai.js";
 import DiagCard                             from "./components/DiagCard.jsx";
 import InputForm, { FollowUpPrompt }        from "./components/InputForm.jsx";
-import { ApiKeyScreen, SettingsPanel, ConsentScreen } from "./components/Auth.jsx";
+import { SettingsPanel, ConsentScreen } from "./components/Auth.jsx";
 import ErrorBoundary                        from "./components/ErrorBoundary.jsx";
 import ConfirmModal                         from "./components/ConfirmModal.jsx";
 import useCases                             from "./hooks/useCases.js";
@@ -72,7 +72,6 @@ function App() {
   const t = darkMode ? DARK : LIGHT;
 
   const [appReady,     setAppReady]     = useState(false);
-  const [hasApiKey,    setHasApiKey]    = useState(false);
   const [hasConsent,   setHasConsent]   = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
@@ -105,16 +104,12 @@ function App() {
   // ── Init ────────────────────────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
-      const [apiKey, consent] = await Promise.all([
-        window.electronAPI.apiKey.get(),
-        store.get("gearbrain_consent"),
-      ]);
-      setHasApiKey(!!apiKey);
+      const consent = await store.get("gearbrain_consent");
       setHasConsent(!!consent);
       await loadCases();
       const cfg = await window.electronAPI.cloud.configGet();
       if (cfg.installationId) setInstallationId(cfg.installationId);
-      if (cfg.enabled) setCloudStatus('ok');
+      setCloudStatus('ok');
       setAppReady(true);
     })();
   }, [loadCases]);
@@ -299,8 +294,6 @@ function App() {
       setHasConsent(true);
     }} />;
   }
-
-  if (!hasApiKey) return <ApiKeyScreen t={t} onSaved={() => setHasApiKey(true)} />;
 
   // ── Hlavní render ────────────────────────────────────────────────────────────
   return (
@@ -661,7 +654,7 @@ function App() {
 
       {/* ── Nastavení ── */}
       {showSettings && (
-        <SettingsPanel t={t} onClose={() => setShowSettings(false)} onKeyDeleted={() => { setShowSettings(false); setHasApiKey(false); }} onCloudConfigSaved={() => setCloudStatus('ok')} />
+        <SettingsPanel t={t} onClose={() => setShowSettings(false)} />
       )}
 
       {/* ── MODAL: Uzavřít případ ── */}

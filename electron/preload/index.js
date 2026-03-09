@@ -15,13 +15,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     delete: (key)        => ipcRenderer.invoke('storage:delete', key),
   },
 
-  // API klíč
-  apiKey: {
-    get:    ()    => ipcRenderer.invoke('apikey:get'),
-    set:    (key) => ipcRenderer.invoke('apikey:set', key),
-    delete: ()    => ipcRenderer.invoke('apikey:delete'),
-  },
-
   // AI model
   model: {
     get: ()      => ipcRenderer.invoke('model:get'),
@@ -57,9 +50,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Cloud databáze (Supabase)
   cloud: {
     configGet:    ()              => ipcRenderer.invoke('cloud:config-get'),
-    configSet:    (url, anonKey)  => ipcRenderer.invoke('cloud:config-set', { url, anonKey }),
-    configDelete: ()              => ipcRenderer.invoke('cloud:config-delete'),
-    test:         ()              => ipcRenderer.invoke('cloud:test'),
     push:         (kase)          => ipcRenderer.invoke('cloud:push', kase),
     searchCases:  (input, installationId) => ipcRenderer.invoke('cloud:search-cases', { input, installationId }),
   },
