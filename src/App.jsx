@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
 import { DARK, LIGHT }                      from "./theme.js";
-import { VEHICLE_MODELS, EMPTY_VEHICLE }    from "./constants/index.js";
+import { VEHICLE_MODELS, EMPTY_VEHICLE, getModelPowers } from "./constants/index.js";
 import { uid, fmtDate, fmtMileage }         from "./lib/utils.js";
 import { smartRepair, buildSystemPrompt, checkTopicRelevance, CASE_TOKEN_LIMIT } from "./lib/ai.js";
 import DiagCard                             from "./components/DiagCard.jsx";
@@ -158,7 +158,7 @@ function App() {
     const ragInput = { vehicle, symptoms: allSymptoms, obdCodes: allObdCodes, text: allTexts.join(" ") };
 
     const userPrompt = [
-      (vehicle.brand || vehicle.model) && `Vozidlo: ${[vehicle.brand, vehicle.model].filter(Boolean).join(" ")}`,
+      (vehicle.brand || vehicle.model) && `Vozidlo: ${[vehicle.brand, vehicle.model, vehicle.enginePower].filter(Boolean).join(" ")}`,
       vehicle.mileage                  && `Nájezd: ${vehicle.mileage} km`,
       allSymptoms.length               && `Příznaky: ${allSymptoms.join(", ")}`,
       allObdCodes.length               && `OBD kódy: ${allObdCodes.join(", ")}`,
@@ -475,11 +475,11 @@ function App() {
                   <div style={{ fontSize: "0.78rem", color: t.textFaint }}>Zadejte informace o vozidle a první příznaky závady</div>
                 </div>
 
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 18 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
                   <div>
                     <div style={{ fontSize: "0.68rem", color: t.textFaint, letterSpacing: "0.1em", marginBottom: 6 }}>MODEL VOZIDLA</div>
                     <select value={newVehicle.model}
-                      onChange={(e) => { const item = VEHICLE_MODELS.find((m) => m.label === e.target.value); if (item?.label) setNewVehicle((v) => ({ ...v, model: item.label })); }}
+                      onChange={(e) => { const item = VEHICLE_MODELS.find((m) => m.label === e.target.value); if (item?.label) setNewVehicle((v) => ({ ...v, model: item.label, enginePower: "" })); }}
                       style={{ width: "100%", background: t.bgInput, border: `1px solid ${t.borderInput}`, color: t.text, padding: "9px 10px", fontSize: "0.82rem", fontFamily: "inherit", borderRadius: 2, outline: "none" }}>
                       <option value="">— Vyberte model —</option>
                       {VEHICLE_MODELS.map((item, i) =>
@@ -490,11 +490,23 @@ function App() {
                     </select>
                   </div>
                   <div>
-                    <div style={{ fontSize: "0.68rem", color: t.textFaint, letterSpacing: "0.1em", marginBottom: 6 }}>NÁJEZD (KM)</div>
-                    <input type="number" placeholder="185000" value={newVehicle.mileage}
-                      onChange={(e) => setNewVehicle((v) => ({ ...v, mileage: e.target.value }))}
-                      style={{ width: "100%", background: t.bgInput, border: `1px solid ${t.borderInput}`, color: t.text, padding: "9px 10px", fontSize: "0.82rem", fontFamily: "inherit", borderRadius: 2, outline: "none" }} />
+                    <div style={{ fontSize: "0.68rem", color: t.textFaint, letterSpacing: "0.1em", marginBottom: 6 }}>VÝKON MOTORU</div>
+                    {(() => { const powers = getModelPowers(newVehicle.model); return (
+                      <select value={newVehicle.enginePower}
+                        onChange={(e) => setNewVehicle((v) => ({ ...v, enginePower: e.target.value }))}
+                        disabled={!powers.length}
+                        style={{ width: "100%", background: t.bgInput, border: `1px solid ${t.borderInput}`, color: powers.length ? t.text : t.textFaint, padding: "9px 10px", fontSize: "0.82rem", fontFamily: "inherit", borderRadius: 2, outline: "none", opacity: powers.length ? 1 : 0.5 }}>
+                        <option value="">— Nepovinné —</option>
+                        {powers.map((p, i) => <option key={i} value={p}>{p}</option>)}
+                      </select>
+                    ); })()}
                   </div>
+                </div>
+                <div style={{ marginBottom: 18 }}>
+                  <div style={{ fontSize: "0.68rem", color: t.textFaint, letterSpacing: "0.1em", marginBottom: 6 }}>NÁJEZD (KM)</div>
+                  <input type="number" placeholder="185000" value={newVehicle.mileage}
+                    onChange={(e) => setNewVehicle((v) => ({ ...v, mileage: e.target.value }))}
+                    style={{ width: "100%", background: t.bgInput, border: `1px solid ${t.borderInput}`, color: t.text, padding: "9px 10px", fontSize: "0.82rem", fontFamily: "inherit", borderRadius: 2, outline: "none" }} />
                 </div>
 
                 {error && <div style={{ marginBottom: 14, padding: "10px 13px", background: "rgba(220,38,38,0.08)", border: "1px solid #dc2626", color: "#dc2626", fontSize: "0.82rem", borderRadius: 2 }}>⚠ {error}</div>}
@@ -513,6 +525,7 @@ function App() {
                   <div style={{ fontSize: "0.9rem", color: t.text, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{activeCase.name}</div>
                   <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                     {activeCase.vehicle?.model   && <span style={{ fontSize: "0.68rem", color: t.textFaint }}>{activeCase.vehicle.model}</span>}
+                    {activeCase.vehicle?.enginePower && <span style={{ fontSize: "0.68rem", color: t.textVeryFaint }}>· {activeCase.vehicle.enginePower}</span>}
                     {activeCase.vehicle?.mileage && <span style={{ fontSize: "0.68rem", color: t.textVeryFaint }}>· {fmtMileage(activeCase.vehicle.mileage)}</span>}
                     <StatusBadge status={activeCase.status} t={t} />
                     {activeCase.status === "rozpracovaný" && (() => {

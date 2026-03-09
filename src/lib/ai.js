@@ -118,17 +118,17 @@ Pravidla: Odpovídáš VÝHRADNĚ na otázky týkající se diagnostiky a opravy
 function buildRagBlock(cases) {
   const entries = cases.map((c, i) => {
     const { symptoms, obdCodes } = extractSignals(c)
-    const vehicle = [c.vehicle?.brand, c.vehicle?.model].filter(Boolean).join(" ") || "?"
+    const vehicle = [c.vehicle?.brand, c.vehicle?.model, c.vehicle?.enginePower].filter(Boolean).join(" ") || "?"
     const score   = c.ragScore ?? 0
 
     // Odstupňování podle skutečného skóre z Edge Function
-    // Skóre: brand(2) + model(3) + OBD×4 + příznak×1.5 + text(max 2)
-    // Vysoká shoda ≥ 11 = min. model + OBD + příznak
-    // Střední shoda ≥ 8  = min. model + OBD nebo OBD + 2 příznaky
-    // Částečná shoda < 8 = slabá kombinace signálů
-    const strength = score >= 11 ? "🔴 VYSOKÁ SHODA"
-                   : score >= 8  ? "🟡 STŘEDNÍ SHODA"
-                                 : "🟢 ČÁSTEČNÁ SHODA"
+    // Skóre (v rámci stejné značky): model(3) + power(2) + OBD×4 + příznak×1.5 + text(max 2)
+    // Vysoká shoda ≥ 8  = min. model + OBD + příznak nebo model + power + OBD
+    // Střední shoda ≥ 5  = min. model + power nebo OBD + příznak
+    // Částečná shoda < 5 = slabá kombinace signálů
+    const strength = score >= 8 ? "🔴 VYSOKÁ SHODA"
+                   : score >= 5 ? "🟡 STŘEDNÍ SHODA"
+                                : "🟢 ČÁSTEČNÁ SHODA"
 
     return (
       `[${i + 1}] ${strength} (skóre: ${score.toFixed(1)}) | ${vehicle}\n` +

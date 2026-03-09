@@ -11,28 +11,45 @@ export const VEHICLE_CATALOG = [
   {
     brand:     "Ford",
     active:    true,
-    expertise: "Ford Transit všech generací a variant (TDCi, EcoBlue, EcoBoost) od roku 2000 do současnosti, EU spec (AdBlue, DPF Euro 5/6, SCR systémy)",
+    expertise: "Ford Transit všech generací a variant (TDCi, EcoBlue, EcoBoost, Elektro) od roku 2006 do současnosti, EU spec (AdBlue, DPF Euro 5/6, SCR systémy)",
     models: [
-      { group: "Transit (plná velikost)" },
-      { label: "Transit 2.2 TDCi (2006–2014)" },
-      { label: "Transit 2.4 TDCi (2006–2014)" },
-      { label: "Transit 2.2 TDCi (2014–2019)" },
-      { label: "Transit 2.0 TDCi (2016–2019)" },
-      { label: "Transit 2.0 EcoBlue (2019–současnost)" },
+      // ── 1. Transit (velká dodávka) ──────────────────────────────────────────
+      { group: "Transit (velká dodávka)" },
+      { label: "Transit MK7 2.2 TDCi (2006–2011)",        powers: ["63 kW (85 k)", "81 kW (110 k)", "85 kW (115 k)", "96 kW (130 k)", "103 kW (140 k)"] },
+      { label: "Transit MK7 2.4 TDCi (2006–2011)",        powers: ["74 kW (100 k)", "85 kW (115 k)", "103 kW (140 k)"] },
+      { label: "Transit MK7 3.2 TDCi (2006–2011)",        powers: ["147 kW (200 k)"] },
+      { label: "Transit MK7 2.3 Duratec (2006–2011)",     powers: ["107 kW (145 k)"] },
+      { label: "Transit MK7 FL 2.2 TDCi (2011–2014)",     powers: ["74 kW (100 k)", "92 kW (125 k)", "114 kW (155 k)"] },
+      { label: "Transit MK8 2.2 TDCi (2014–2016)",        powers: ["74 kW (100 k)", "92 kW (125 k)", "114 kW (155 k)"] },
+      { label: "Transit MK8 2.0 EcoBlue (2016–současnost)", powers: ["77 kW (105 k)", "96 kW (130 k)", "125 kW (170 k)", "136 kW (185 k)"] },
+      { label: "E-Transit Elektro (2022–současnost)",      powers: ["135 kW (184 k)", "198 kW (269 k)"] },
+
+      // ── 2. Transit Custom (střední dodávka) ────────────────────────────────
       { group: "Transit Custom" },
-      { label: "Transit Custom 2.2 TDCi (2012–2018)" },
-      { label: "Transit Custom 2.0 EcoBlue (2018–2023)" },
-      { label: "Transit Custom 1.0 EcoBoost PHEV (2019–2023)" },
-      { label: "Transit Custom 2.0 EcoBlue (2023–současnost)" },
+      { label: "Transit Custom I 2.2 TDCi (2012–2016)",          powers: ["74 kW (100 k)", "92 kW (125 k)", "113 kW (154 k)"] },
+      { label: "Transit Custom I FL 2.0 EcoBlue (2016–2023)",    powers: ["77 kW (105 k)", "96 kW (130 k)", "125 kW (170 k)", "136 kW (185 k)"] },
+      { label: "Transit Custom I 1.0 EcoBoost PHEV (2019–2023)", powers: ["93 kW (126 k)"] },
+      { label: "Transit Custom II 2.0 EcoBlue (2023–současnost)", powers: ["81 kW (110 k)", "100 kW (136 k)", "110 kW (150 k)", "125 kW (170 k)"] },
+      { label: "Transit Custom II 2.5 Duratec PHEV (2023–současnost)", powers: ["171 kW (232 k)"] },
+      { label: "E-Transit Custom Elektro (2024–současnost)",     powers: ["100 kW (136 k)", "160 kW (218 k)", "210 kW (285 k)"] },
+
+      // ── 3. Transit Connect (kompaktní dodávka) ─────────────────────────────
       { group: "Transit Connect" },
-      { label: "Transit Connect 1.8 TDCi (2006–2013)" },
-      { label: "Transit Connect 1.6 TDCi (2013–2018)" },
-      { label: "Transit Connect 1.5 EcoBlue (2018–2022)" },
-      { label: "Transit Connect 1.5 EcoBlue (2022–současnost)" },
+      { label: "Transit Connect I 1.8 TDCi (2006–2013)",         powers: ["55 kW (75 k)", "66 kW (90 k)", "81 kW (110 k)"] },
+      { label: "Transit Connect II 1.6 TDCi (2013–2015)",        powers: ["55 kW (75 k)", "70 kW (95 k)", "85 kW (115 k)"] },
+      { label: "Transit Connect II 1.0 EcoBoost (2013–2018)",    powers: ["74 kW (100 k)"] },
+      { label: "Transit Connect II 1.5 TDCi (2015–2018)",        powers: ["55 kW (75 k)", "74 kW (100 k)", "88 kW (120 k)"] },
+      { label: "Transit Connect II FL 1.5 EcoBlue (2018–2024)",  powers: ["55 kW (75 k)", "74 kW (100 k)", "88 kW (120 k)"] },
+      { label: "Transit Connect III 2.0 EcoBlue (2024–současnost)", powers: ["75 kW (102 k)", "90 kW (122 k)"] },
+      { label: "Transit Connect III 1.5 EcoBoost PHEV (2024–současnost)", powers: ["110 kW (150 k)"] },
+
+      // ── 4. Transit Courier (nejmenší dodávka) ──────────────────────────────
       { group: "Transit Courier" },
-      { label: "Transit Courier 1.5 TDCi (2014–2023)" },
-      { label: "Transit Courier 1.0 EcoBoost (2014–2023)" },
-      { label: "Transit Courier 1.5 EcoBlue (2023–současnost)" },
+      { label: "Transit Courier I 1.5/1.6 TDCi (2014–2023)",    powers: ["55 kW (75 k)", "70 kW (95 k)", "74 kW (100 k)"] },
+      { label: "Transit Courier I 1.0 EcoBoost (2014–2023)",    powers: ["74 kW (100 k)"] },
+      { label: "Transit Courier II 1.0 EcoBoost (2023–současnost)", powers: ["74 kW (100 k)", "92 kW (125 k)"] },
+      { label: "Transit Courier II 1.5 EcoBlue (2023–současnost)", powers: ["74 kW (100 k)"] },
+      { label: "E-Transit Courier Elektro (2025–současnost)",    powers: ["100 kW (136 k)"] },
     ],
   },
 
@@ -106,7 +123,17 @@ export const VEHICLE_MODELS = ACTIVE_BRANDS.length === 1
 export const DEFAULT_BRAND  = ACTIVE_BRANDS[0]?.brand ?? ""
 
 /** Prázdné vozidlo pro nový případ */
-export const EMPTY_VEHICLE  = { brand: DEFAULT_BRAND, model: "", mileage: "" }
+export const EMPTY_VEHICLE  = { brand: DEFAULT_BRAND, model: "", mileage: "", enginePower: "" }
+
+/** Vrátí pole dostupných výkonů pro daný model (label) */
+export function getModelPowers(modelLabel) {
+  if (!modelLabel) return []
+  for (const brand of VEHICLE_CATALOG) {
+    const entry = brand.models.find(m => m.label === modelLabel)
+    if (entry?.powers) return entry.powers
+  }
+  return []
+}
 
 // ── Příznaky podle kategorie ──────────────────────────────────────────────────
 export const SYMPTOM_CATEGORIES = {

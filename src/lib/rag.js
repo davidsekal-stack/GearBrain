@@ -4,20 +4,23 @@
  * computeSimilarity() — skórovací logika, sdílena s Edge Function search-cases
  * extractSignals()    — pomocná funkce pro sestavení RAG bloku v system promptu
  *
+ * Značka vozidla se nepoužívá ke scoringu — slouží jako pre-filtr
+ * (Edge Function filtruje na DB úrovni, lokálně se předpokládá stejná značka).
+ *
  * Scoring algoritmus (shodný s supabase/functions/search-cases/index.ts):
- *   +2   shoda značky vozidla
  *   +3   shoda modelu vozidla
+ *   +2   shoda výkonu motoru
  *   +4   shoda OBD kódu  (nejsilnější diagnostický signál)
  *   +1.5 shoda příznaku
  *   +0.3 shoda klíčového slova z volného textu (>4 znaky), max +2 celkem
  *
- * Prahy relevance:
- *   OWN_THRESHOLD   = 6  — záznamy z této instalace (nižší — chceme vidět i svá starší řešení)
- *   OTHER_THRESHOLD = 10 — záznamy od ostatních servisů
+ * Prahy relevance (v rámci stejné značky):
+ *   OWN_THRESHOLD   = 5  — záznamy z této instalace
+ *   OTHER_THRESHOLD = 8  — záznamy od ostatních servisů
  */
 
-const OWN_THRESHOLD   = 6
-const OTHER_THRESHOLD = 10
+const OWN_THRESHOLD   = 5
+const OTHER_THRESHOLD = 8
 
 // FIX #5: Max příspěvek z klíčových slov volného textu
 // Bez tohoto limitu může 30+ slov ve volném textu přidat 9+ bodů
@@ -39,8 +42,9 @@ export function computeSimilarity(closed, input) {
 
   let score = 0
 
-  if (input.vehicle?.brand && closed.vehicle?.brand === input.vehicle.brand) score += 2
+  // Značka se nepoužívá ke scoringu — slouží jako pre-filtr (viz Edge Function)
   if (input.vehicle?.model && closed.vehicle?.model === input.vehicle.model) score += 3
+  if (input.vehicle?.enginePower && closed.vehicle?.enginePower === input.vehicle.enginePower) score += 2
 
   for (const code of input.obdCodes ?? []) {
     if (allText.includes(code.toLowerCase())) score += 4

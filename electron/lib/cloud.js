@@ -128,6 +128,7 @@ function caseToRow(kase, installationId) {
     vehicle_brand:   kase.vehicle?.brand  || null,
     vehicle_model:   kase.vehicle?.model  || null,
     mileage:         kase.vehicle?.mileage ? (parseInt(kase.vehicle.mileage, 10) ?? null) : null,
+    engine_power:    kase.vehicle?.enginePower || null,
     symptoms,
     obd_codes:       obdCodes,
     description,
@@ -148,9 +149,10 @@ function rowToCase(row) {
     fromCloud:      true,
     installationId: row.installation_id,
     vehicle: {
-      brand:   row.vehicle_brand  || '',
-      model:   row.vehicle_model  || '',
-      mileage: row.mileage?.toString() || '',
+      brand:       row.vehicle_brand  || '',
+      model:       row.vehicle_model  || '',
+      mileage:     row.mileage?.toString() || '',
+      enginePower: row.engine_power   || '',
     },
     messages: [
       {
