@@ -189,6 +189,8 @@ function App() {
     try {
       await ragPromise;
       const data   = await storage.callClaude({ systemPrompt: buildSystemPrompt(similar, vehicle), userMessage: userPrompt, maxTokens: 4000 });
+      if (data.error) throw new Error(data.error.message || "AI vrátilo chybu.");
+      if (!data.content) throw new Error("AI nevrátilo odpověď. Zkuste to znovu.");
       const raw    = data.content.map((b) => b.text ?? "").join("");
       const parsed = smartRepair(raw);
 
