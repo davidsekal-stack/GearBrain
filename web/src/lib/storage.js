@@ -114,23 +114,39 @@ export async function pushClosedCase(kase) {
   return { ok: true }
 }
 
+// ── Supabase Edge Function URL + auth headers ────────────────────────────────
+
+const FUNCTIONS_URL = 'https://nmvjthfezyjcwuzphiuu.supabase.co/functions/v1'
+
+async function edgeFetch(fnName, body) {
+  const { data: { session } } = await supabase.auth.getSession()
+  const token = session?.access_token
+  const res = await fetch(`${FUNCTIONS_URL}/${fnName}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`,
+      'apikey': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5tdmp0aGZlenlqY3d1enBoaXV1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI3MzcwNTAsImV4cCI6MjA4ODMxMzA1MH0.acMPCJe2asOToPXg6DQccejtLOUbD8EMx9Z9FqWo_xo',
+    },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json()
+  if (!res.ok && data.error) throw new Error(data.error.message || `Edge Function ${fnName}: HTTP ${res.status}`)
+  return data
+}
+
 // ── Call Claude via Edge Function ──────────────────────────────────────────────
 
 export async function callClaude({ systemPrompt, userMessage, maxTokens = 4000, model = 'claude-sonnet-4-6' }) {
   const { data: { user } } = await supabase.auth.getUser()
 
-  const res = await supabase.functions.invoke('anthropic-proxy', {
-    body: {
-      model,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userMessage }],
-      max_tokens: maxTokens,
-      installation_id: user?.id ?? 'web-anonymous',
-    },
+  return edgeFetch('anthropic-proxy', {
+    model,
+    system: systemPrompt,
+    messages: [{ role: 'user', content: userMessage }],
+    max_tokens: maxTokens,
+    installation_id: user?.id ?? 'web-anonymous',
   })
-
-  if (res.error) throw new Error(res.error.message || 'AI volání selhalo')
-  return res.data
 }
 
 // ── Search cases via Edge Function ─────────────────────────────────────────────
@@ -138,16 +154,15 @@ export async function callClaude({ systemPrompt, userMessage, maxTokens = 4000, 
 export async function searchCases(ragInput) {
   const { data: { user } } = await supabase.auth.getUser()
 
-  const res = await supabase.functions.invoke('search-cases', {
-    body: {
+  try {
+    return await edgeFetch('search-cases', {
       vehicle:        ragInput.vehicle,
       symptoms:       ragInput.symptoms,
       obdCodes:       ragInput.obdCodes,
       text:           ragInput.text,
       installationId: user?.id ?? 'web-anonymous',
-    },
-  })
-
-  if (res.error) return { cases: [], count: 0 }
-  return res.data ?? { cases: [], count: 0 }
+    })
+  } catch {
+    return { cases: [], count: 0 }
+  }
 }
