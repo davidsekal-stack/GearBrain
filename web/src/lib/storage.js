@@ -130,9 +130,13 @@ async function edgeFetch(fnName, body) {
     },
     body: JSON.stringify(body),
   })
-  const data = await res.json()
-  if (!res.ok && data.error) throw new Error(data.error.message || `Edge Function ${fnName}: HTTP ${res.status}`)
-  return data
+  if (!res.ok) {
+    const text = await res.text()
+    let msg = `Edge Function ${fnName}: HTTP ${res.status}`
+    try { const j = JSON.parse(text); msg = j.error?.message || j.msg || msg } catch {}
+    throw new Error(msg)
+  }
+  return res.json()
 }
 
 // ── Call Claude via Edge Function ──────────────────────────────────────────────
