@@ -12,16 +12,35 @@ const DAY = 24 * 60 * 60 * 1000;
 const YEAR = minThreadAgeMs(); // the live age threshold (default 365d)
 
 // ───────────────────────────────────────────────────────────────────────────
-// parseWhenToDate — ISO + bare epoch only; localized/relative => null (unknown)
+// parseWhenToDate — ISO + bare epoch + EU deterministic absolute dates;
+// ambiguous (slash), relative, 2-digit-year, or invalid => null (unknown = process now)
 // ───────────────────────────────────────────────────────────────────────────
 assert.equal(parseWhenToDate('2024-03-11T08:22:00+0000'), Date.parse('2024-03-11T08:22:00+0000'), 'ISO with numeric offset');
 assert.equal(parseWhenToDate('2024-03-11T08:22:00.000Z'), Date.parse('2024-03-11T08:22:00.000Z'), 'ISO with Z + ms');
 assert.equal(parseWhenToDate('2024-03-11'), Date.parse('2024-03-11'), 'ISO date-only');
 assert.equal(parseWhenToDate('1710144120'), 1710144120 * 1000, '10-digit unix seconds → ms');
 assert.equal(parseWhenToDate('1710144120000'), 1710144120000, '13-digit unix ms');
+
+// EU absolute dates now RE-ARM the age gate (all resolve to 2024-03-15 UTC).
+const MAR15 = Date.UTC(2024, 2, 15);
+assert.equal(parseWhenToDate('15.03.2024'), MAR15, 'dd.mm.yyyy (EU dot = day-first)');
+assert.equal(parseWhenToDate('15. 3. 2024'), MAR15, 'dd. m. yyyy with spaces (Czech)');
+assert.equal(parseWhenToDate('st 15. 03. 2024 14:23'), MAR15, 'EU date embedded in a longer visible string');
+assert.equal(parseWhenToDate('15. března 2024'), MAR15, 'Czech genitive month name');
+assert.equal(parseWhenToDate('15. März 2024'), MAR15, 'German month name (umlaut folded)');
+assert.equal(parseWhenToDate('15 March 2024'), MAR15, 'English day month year');
+assert.equal(parseWhenToDate('March 15, 2024'), MAR15, 'English month day, year');
+assert.equal(parseWhenToDate('2024.03.15'), MAR15, 'year-first dotted');
+assert.equal(parseWhenToDate('11. listopadu 2023'), Date.UTC(2023, 10, 11), 'Czech November genitive');
+
+// Still null: ambiguous / relative / unreliable → safe "process now".
 assert.equal(parseWhenToDate('vor 2 Stunden'), null, 'German relative → null');
 assert.equal(parseWhenToDate('včera'), null, 'Czech relative → null');
-assert.equal(parseWhenToDate('11 March 2024'), null, 'non-ISO absolute → null (safe: process now)');
+assert.equal(parseWhenToDate('03/04/2024'), null, 'slash dd/mm is US↔EU ambiguous → null');
+assert.equal(parseWhenToDate('15.03.24'), null, '2-digit year → null (century ambiguous)');
+assert.equal(parseWhenToDate('32.01.2024'), null, 'invalid day → null');
+assert.equal(parseWhenToDate('15.13.2024'), null, 'invalid month → null');
+assert.equal(parseWhenToDate('31.02.2024'), null, 'calendar overflow (Feb 31) → null');
 assert.equal(parseWhenToDate('garbage'), null, 'garbage → null');
 assert.equal(parseWhenToDate(''), null, 'empty → null');
 assert.equal(parseWhenToDate(null), null, 'null → null');
