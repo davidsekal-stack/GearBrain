@@ -259,6 +259,8 @@ export class AgentState {
       'ALTER TABLE runs ADD COLUMN cases_verify_rejected INTEGER DEFAULT 0',
       // Consecutive no-progress-with-errors crawl batches (forum circuit breaker).
       'ALTER TABLE forums ADD COLUMN consecutive_failures INTEGER DEFAULT 0',
+      // Last diary write (throttles the LLM diary to once/forum/day).
+      'ALTER TABLE forums ADD COLUMN diary_written_at TEXT',
     ];
     for (const sql of alterations) {
       try { this.#db.exec(sql); } catch { /* column already exists */ }
@@ -320,6 +322,7 @@ export class AgentState {
       'calibration_json', 'calibration_status', 'calibration_attempts',
       'cooldown_until', 'cooldown_tier_hours', 'cooldown_set_at',
       'diary_md', 'priority_score', 'archive_cursor_json', 'consecutive_failures',
+      'diary_written_at',
     ];
     const entries = Object.entries(fields).filter(([k]) => allowed.includes(k));
     if (entries.length === 0) return;

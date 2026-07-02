@@ -687,25 +687,32 @@ async function phaseCrawl(state, opts) {
       last_crawled_at: crawledAt,
     }, { now: crawledAt }).catch(() => {});
 
-    // ── Write LLM diary entry for this forum ──
-    // Collect top discard reasons from the threads processed this batch.
-    const discardReasons = [];
-    for (const url of processedUrls) {
-      const t = state.getThreadByUrl(url);
-      if (t?.discard_reason) discardReasons.push(t.discard_reason);
-    }
-    const discardCounts = {};
-    for (const r of discardReasons) discardCounts[r] = (discardCounts[r] ?? 0) + 1;
-    const topDiscards = Object.entries(discardCounts)
-      .sort((a, b) => b[1] - a[1]).slice(0, 5).map(([r, n]) => `${r} (×${n})`);
+    // ── Write LLM diary entry for this forum (throttled to once/forum/day) ──
+    // Was ~1 Haiku call per forum per 5-min batch (~60/night); its only consumer
+    // is the calibration prompt for NEW forums, so the write:read ratio was ~400:1.
+    // Keep the diary (the learning loop needs it), just stop rewriting it all night.
+    const todayUtc = new Date().toISOString().slice(0, 10);
+    if ((forum.diary_written_at || '').slice(0, 10) !== todayUtc) {
+      // Collect top discard reasons from the threads processed this batch.
+      const discardReasons = [];
+      for (const url of processedUrls) {
+        const t = state.getThreadByUrl(url);
+        if (t?.discard_reason) discardReasons.push(t.discard_reason);
+      }
+      const discardCounts = {};
+      for (const r of discardReasons) discardCounts[r] = (discardCounts[r] ?? 0) + 1;
+      const topDiscards = Object.entries(discardCounts)
+        .sort((a, b) => b[1] - a[1]).slice(0, 5).map(([r, n]) => `${r} (×${n})`);
 
-    try {
-      // Exclude deferred (too-young, set aside — no verdict) from the diary's
-      // yield denominator, mirroring countCrawledThreads / the coach counters.
-      await writeDiary(state, forum, { threads: processedUrls.length - deferredCount, cases: batchCases }, topDiscards);
-    } catch (err) {
-      if (isStoppingError(err)) throw err;
-      logWarn(`Diary write skipped for ${forum.name || forum.url}: ${err.message}`);
+      try {
+        // Exclude deferred (too-young, set aside — no verdict) from the diary's
+        // yield denominator, mirroring countCrawledThreads / the coach counters.
+        await writeDiary(state, forum, { threads: processedUrls.length - deferredCount, cases: batchCases }, topDiscards);
+        state.updateForum(forum.id, { diary_written_at: new Date().toISOString() });
+      } catch (err) {
+        if (isStoppingError(err)) throw err;
+        logWarn(`Diary write skipped for ${forum.name || forum.url}: ${err.message}`);
+      }
     }
   }
 
