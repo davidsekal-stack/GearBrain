@@ -33,7 +33,8 @@ import { writeDiary } from './diary.mjs';
 import { discoverCandidates } from './discover.mjs';
 import { upsertForum } from './forum-registry.mjs';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { QuotaError, AuthError, isStoppingError, formatQuotaMessage } from './quota.mjs';
 import {
   computePauseUntil,
@@ -385,9 +386,26 @@ async function phaseCalibrate(state, opts) {
 const COOLDOWN_HOURS_SHORT = 24;       // transient enumeration error → retry tomorrow
 const COOLDOWN_HOURS_EXHAUSTED = 720;  // archive fully mined → rest 30 days
 
+// Forum-level circuit breaker: a permanently-blocked forum (e.g. a WAF 406 on
+// every page) used to make ZERO progress yet stay `active` with no cooldown, so
+// every 5-min batch re-ran the full fetch → system-Chrome dump → Crawlee browser
+// launch on the same dead forum, all night, forever. After this many consecutive
+// no-progress-with-errors batches, park it for a day and alarm, instead of
+// burning a browser launch every batch.
+const FORUM_FAILURE_LIMIT = Number(process.env.AGENT_FORUM_FAIL_LIMIT) || 3;
+const COOLDOWN_HOURS_BLOCKED = Number(process.env.AGENT_FORUM_BLOCK_COOLDOWN_H) || 24;
+
 // Archive walk pacing.
 const ARCHIVE_PAGES_PER_BATCH = 2;     // listing pages to advance per forum per batch
 const HEAD_SCAN_PAGES = 2;             // shallow head re-scan for new threads once complete
+
+/**
+ * Circuit-breaker streak: a batch that made NO progress AND hit a fetch failure
+ * bumps the streak; any progress resets it to 0. Pure (exported for tests).
+ */
+export function computeFailureStreak(prev, madeProgress, hadFailure) {
+  return (!madeProgress && hadFailure) ? (Number(prev) || 0) + 1 : 0;
+}
 
 async function phaseCrawl(state, opts) {
   console.log('\n── Phase: CRAWL ──');
@@ -436,6 +454,7 @@ async function phaseCrawl(state, opts) {
     let pendingCount = state.countPendingThreads(forum.id);
 
     let walk = null;
+    let walkFailed = false;   // an attempted archive/head walk threw (fetch blocked)
     try {
       if (!cursor.complete && pendingCount < queueFloor) {
         // Archive not fully mined yet → fetch the next pages and enqueue them.
@@ -475,6 +494,7 @@ async function phaseCrawl(state, opts) {
       }
     } catch (err) {
       if (isStoppingError(err)) throw err;
+      walkFailed = true;
       console.error(`  Error walking archive for ${forum.url}: ${err.message}`);
     }
 
@@ -499,6 +519,8 @@ async function phaseCrawl(state, opts) {
     const processedUrls = [];
     let batchCases = 0;
     let deferredCount = 0;
+    let threadOk = 0;      // threads that reached a real verdict (extracted/discarded/deferred)
+    let threadErrors = 0;  // threads that errored (fetch/parse) this batch
     for (const t of queue) {
       if (pastDeadline()) {
         console.log('  ⏱ Window deadline reached — leaving remaining queued threads pending.');
@@ -523,6 +545,7 @@ async function phaseCrawl(state, opts) {
             title: result.title || null,
           });
           deferredCount++;
+          threadOk++;
           continue;
         }
 
@@ -538,9 +561,11 @@ async function phaseCrawl(state, opts) {
             thread_text: null,
             title: result.title || null,
           });
+          threadOk++;
           continue;
         }
 
+        threadOk++;
         state.updateThread(threadId, {
           status: 'extracted',
           thread_text: result.threadText,
@@ -575,6 +600,7 @@ async function phaseCrawl(state, opts) {
         }
       } catch (err) {
         if (isStoppingError(err)) throw err;  // quota/auth → stop the phase, don't bury the thread
+        threadErrors++;
         console.error(`  Error processing ${url}: ${err.message}`);
         // First transient failure (timeout, 5xx, connection reset) → leave the
         // thread pending so the next batch retries it once; repeated or
@@ -606,12 +632,35 @@ async function phaseCrawl(state, opts) {
       new_threads_last_batch: enqueued,
       cases_total: forumCases,
     };
+    // Circuit breaker: a batch that made NO progress AND hit fetch errors (walk
+    // blocked and/or every thread errored) is a blocked-forum signature. Count
+    // consecutive such batches; on any progress, reset. Enqueuing new threads or
+    // reaching any real verdict counts as progress (an empty but successful
+    // head-scan is NOT a failure — no walkFailed, no threadErrors).
+    const madeProgress = batchCases > 0 || threadOk > 0 || enqueued > 0;
+    const hadFailure = walkFailed || threadErrors > 0;
+    const failStreak = computeFailureStreak(forum.consecutive_failures, madeProgress, hadFailure);
+    forumUpdate.consecutive_failures = failStreak;
+
     if (archiveDone) {
       forumUpdate.status = 'exhausted';
       forumUpdate.cooldown_until = new Date(Date.now() + COOLDOWN_HOURS_EXHAUSTED * 3600_000).toISOString();
       forumUpdate.cooldown_tier_hours = COOLDOWN_HOURS_EXHAUSTED;
       forumUpdate.cooldown_set_at = crawledAt;
       console.log(`  ✓ Archive fully mined — resting ${forum.name || forum.url} for 30 days.`);
+    } else if (failStreak >= FORUM_FAILURE_LIMIT) {
+      // Blocked/dead forum → park for a day and alarm, instead of re-launching a
+      // full browser fetch on it every 5-min batch all night. Reset the streak so
+      // it gets a fresh chance after the cooldown; if it fails again it re-trips
+      // (→ effectively one retry per COOLDOWN_HOURS_BLOCKED, not per batch).
+      forumUpdate.status = 'active';
+      forumUpdate.cooldown_until = new Date(Date.now() + COOLDOWN_HOURS_BLOCKED * 3600_000).toISOString();
+      forumUpdate.cooldown_tier_hours = COOLDOWN_HOURS_BLOCKED;
+      forumUpdate.cooldown_set_at = crawledAt;
+      forumUpdate.consecutive_failures = 0;
+      const msg = `${forum.url}: ${FORUM_FAILURE_LIMIT} consecutive no-progress batches (fetch blocked?) — parking ${COOLDOWN_HOURS_BLOCKED}h instead of retrying every batch`;
+      console.warn(`  ⚠ ${msg}`);
+      state.log('warn', msg, 'crawl');
     } else {
       // Stay eligible: no long park while there is archive left to walk or a
       // backlog to drain.
@@ -1149,7 +1198,14 @@ async function main() {
   state.close();
 }
 
-main().catch(err => {
-  console.error('Fatal:', err);
-  process.exit(1);
-});
+const invokedDirectly = (() => {
+  try { return !!process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; }
+})();
+
+if (invokedDirectly) {
+  main().catch(err => {
+    console.error('Fatal:', err);
+    process.exit(1);
+  });
+}

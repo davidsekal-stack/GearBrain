@@ -257,6 +257,8 @@ export class AgentState {
       // Per-run verify rejections — lets the night report compute the true
       // verify_pass_rate from run throughput, not the lagging created-tonight cohort.
       'ALTER TABLE runs ADD COLUMN cases_verify_rejected INTEGER DEFAULT 0',
+      // Consecutive no-progress-with-errors crawl batches (forum circuit breaker).
+      'ALTER TABLE forums ADD COLUMN consecutive_failures INTEGER DEFAULT 0',
     ];
     for (const sql of alterations) {
       try { this.#db.exec(sql); } catch { /* column already exists */ }
@@ -317,7 +319,7 @@ export class AgentState {
       'new_threads_last_batch', 'cases_total', 'last_crawled_at',
       'calibration_json', 'calibration_status', 'calibration_attempts',
       'cooldown_until', 'cooldown_tier_hours', 'cooldown_set_at',
-      'diary_md', 'priority_score', 'archive_cursor_json',
+      'diary_md', 'priority_score', 'archive_cursor_json', 'consecutive_failures',
     ];
     const entries = Object.entries(fields).filter(([k]) => allowed.includes(k));
     if (entries.length === 0) return;

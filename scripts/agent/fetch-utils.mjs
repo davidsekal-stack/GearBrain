@@ -281,6 +281,16 @@ export async function fetchHtml(url, options = {}) {
           continue;
         }
 
+        // A 503 is often a Cloudflare "Just a moment…" challenge, not a real
+        // outage — once retries are exhausted, give the browser fallback a shot
+        // before failing (a genuine outage just fails there too, as before).
+        if (options.allowBrowserFallback !== false && res.status === 503) {
+          const { html: browserHtml } = await tryBrowserFallback(url, options);
+          if (browserHtml) return browserHtml;
+          const { html: crawleeHtml } = await tryCrawleeFallback(url, options);
+          if (crawleeHtml) return crawleeHtml;
+        }
+
         throw new Error(`HTTP ${res.status} fetching ${url}`);
       }
 
