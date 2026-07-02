@@ -674,53 +674,64 @@ async function phaseCrawl(state, opts) {
 async function phaseVerify(state, opts) {
   console.log('\n── Phase: VERIFY ──');
 
-  const cases = state.getCasesForVerification(opts.batchSize, VERIFY_RETRY_LIMIT);
-  if (cases.length === 0) {
+  let passed = 0;
+  let failed = 0;
+  let drained = false;
+
+  // Drain the whole queue batch-by-batch (was: ONE batch per run). Verify
+  // throughput was capped at batchSize/run ≈ 120/night while extraction makes
+  // ~140/night — the ai_approved backlog grew without bound (260 cases by
+  // 2026-07-02) and the night report said "verified: 0" for cases that passed
+  // 1–2 nights later. Termination: every processed case changes status or
+  // bumps its attempts past the retry limit, so the selection always shrinks.
+  while (!pastDeadline()) {
+    const cases = state.getCasesForVerification(opts.batchSize, VERIFY_RETRY_LIMIT);
+    if (cases.length === 0) break;
+    drained = true;
+    console.log(`  Verifying ${cases.length} case(s) with the independent AI auditor...`);
+
+    for (const c of cases) {
+      if (pastDeadline()) break;
+      const payload = JSON.parse(c.payload_json);
+      state.updateCase(c.id, { verify_attempts: (c.verify_attempts ?? 0) + 1 });
+
+      // Get original thread text
+      const thread = state.getThread(c.thread_id);
+      if (!thread?.thread_text) {
+        console.log(`  ⊘ ${c.id}: no thread text available, skipping`);
+        state.updateCase(c.id, { status: 'verify_skipped', review_note: 'No thread text' });
+        continue;
+      }
+
+      try {
+        const result = await verifyCase(thread.thread_text, payload, {
+          timeoutMs: opts.verifyTimeoutMs || 120_000,
+        });
+
+        if (result.verdict === 'PASS') {
+          state.updateCase(c.id, { status: 'verified', review_note: 'Verifier: PASS' });
+          passed++;
+          console.log(`  ✓ ${c.id}`);
+        } else {
+          state.updateCase(c.id, { status: 'verify_rejected', review_note: `Verifier: ${result.reason}` });
+          failed++;
+          console.log(`  ✗ ${c.id}: ${result.reason}`);
+        }
+      } catch (err) {
+        if (isStoppingError(err)) throw err;  // quota/auth → stop the phase
+        state.updateCase(c.id, { status: 'verify_error', review_note: `Error: ${err.message}` });
+        failed++;
+        console.error(`  ✗ ${c.id}: error — ${err.message}`);
+      }
+
+      await sleep(1000); // Brief pause between verifier calls
+    }
+  }
+
+  if (!drained) {
     console.log('  No cases pending verification.');
     return {};
   }
-
-  console.log(`  Verifying ${cases.length} case(s) with the independent AI auditor...`);
-  let passed = 0;
-  let failed = 0;
-
-  for (const c of cases) {
-    if (pastDeadline()) break;
-    const payload = JSON.parse(c.payload_json);
-    state.updateCase(c.id, { verify_attempts: (c.verify_attempts ?? 0) + 1 });
-
-    // Get original thread text
-    const thread = state.getThread(c.thread_id);
-    if (!thread?.thread_text) {
-      console.log(`  ⊘ ${c.id}: no thread text available, skipping`);
-      state.updateCase(c.id, { status: 'verify_skipped', review_note: 'No thread text' });
-      continue;
-    }
-
-    try {
-      const result = await verifyCase(thread.thread_text, payload, {
-        timeoutMs: opts.verifyTimeoutMs || 120_000,
-      });
-
-      if (result.verdict === 'PASS') {
-        state.updateCase(c.id, { status: 'verified', review_note: 'Verifier: PASS' });
-        passed++;
-        console.log(`  ✓ ${c.id}`);
-      } else {
-        state.updateCase(c.id, { status: 'verify_rejected', review_note: `Verifier: ${result.reason}` });
-        failed++;
-        console.log(`  ✗ ${c.id}: ${result.reason}`);
-      }
-    } catch (err) {
-      if (isStoppingError(err)) throw err;  // quota/auth → stop the phase
-      state.updateCase(c.id, { status: 'verify_error', review_note: `Error: ${err.message}` });
-      failed++;
-      console.error(`  ✗ ${c.id}: error — ${err.message}`);
-    }
-
-    await sleep(1000); // Brief pause between verifier calls
-  }
-
   console.log(`  Verification done: ${passed} passed, ${failed} failed.`);
   return { cases_verified: passed };
 }
@@ -732,72 +743,78 @@ async function phaseVerify(state, opts) {
 async function phaseCrosscheck(state, opts) {
   console.log('\n── Phase: CROSSCHECK ──');
 
-  const cases = state.getCasesForCrosscheck(opts.batchSize, CROSSCHECK_RETRY_LIMIT);
-  if (cases.length === 0) {
-    console.log('  No verified cases pending crosscheck.');
-    return {};
-  }
-
-  const { supabaseUrl, supabaseKey } = requireSupabaseConfig('read');
-
   let passed = 0;
   let dupes = 0;
   let errors = 0;
+  let drained = false;
 
-  for (const c of cases) {
-    if (pastDeadline()) break;
-    const payload = JSON.parse(c.payload_json);
-    state.updateCase(c.id, { crosscheck_attempts: (c.crosscheck_attempts ?? 0) + 1 });
+  // Drain the whole queue batch-by-batch — see phaseVerify for the rationale
+  // (verify now drains, so crosscheck/import must keep up in the same run).
+  while (!pastDeadline()) {
+    const cases = state.getCasesForCrosscheck(opts.batchSize, CROSSCHECK_RETRY_LIMIT);
+    if (cases.length === 0) break;
+    drained = true;
+    const { supabaseUrl, supabaseKey } = requireSupabaseConfig('read');
 
-    const localDuplicates = state.getCasesForThread(c.thread_id, c.id)
-      .filter(other => LOCAL_DUPLICATE_STATUSES.has(other.status))
-      .some(other => isLikelyLocalDuplicate(payload, safeJsonParse(other.payload_json)));
+    for (const c of cases) {
+      if (pastDeadline()) break;
+      const payload = JSON.parse(c.payload_json);
+      state.updateCase(c.id, { crosscheck_attempts: (c.crosscheck_attempts ?? 0) + 1 });
 
-    if (localDuplicates) {
-      state.updateCase(c.id, {
-        status: 'crosscheck_dupe',
-        review_note: 'Duplicate of an existing local case for the same thread',
-      });
-      dupes++;
-      continue;
-    }
+      const localDuplicates = state.getCasesForThread(c.thread_id, c.id)
+        .filter(other => LOCAL_DUPLICATE_STATUSES.has(other.status))
+        .some(other => isLikelyLocalDuplicate(payload, safeJsonParse(other.payload_json)));
 
-    try {
-      const result = await crosscheckCaseAgainstSupabase({
-        supabaseUrl,
-        supabaseKey,
-        payload,
-      });
-
-      if (result.status === 'error') {
+      if (localDuplicates) {
         state.updateCase(c.id, {
-          status: 'crosscheck_error',
-          review_note: result.reviewNote,
+          status: 'crosscheck_dupe',
+          review_note: 'Duplicate of an existing local case for the same thread',
         });
-        errors++;
-        console.error(`  Crosscheck query failed for ${c.id}: HTTP ${result.httpStatus}`);
-        continue;
-      }
-
-      if (result.status === 'duplicate') {
-        state.updateCase(c.id, { status: 'crosscheck_dupe', review_note: 'Duplicate resolution in Supabase' });
         dupes++;
         continue;
       }
-    } catch (err) {
-      state.updateCase(c.id, {
-        status: 'crosscheck_error',
-        review_note: `Crosscheck error: ${err.message}`,
-      });
-      errors++;
-      console.error(`  Crosscheck query failed for ${c.id}: ${err.message}`);
-      continue;
-    }
 
-    state.updateCase(c.id, { status: 'import_ready' });
-    passed++;
+      try {
+        const result = await crosscheckCaseAgainstSupabase({
+          supabaseUrl,
+          supabaseKey,
+          payload,
+        });
+
+        if (result.status === 'error') {
+          state.updateCase(c.id, {
+            status: 'crosscheck_error',
+            review_note: result.reviewNote,
+          });
+          errors++;
+          console.error(`  Crosscheck query failed for ${c.id}: HTTP ${result.httpStatus}`);
+          continue;
+        }
+
+        if (result.status === 'duplicate') {
+          state.updateCase(c.id, { status: 'crosscheck_dupe', review_note: 'Duplicate resolution in Supabase' });
+          dupes++;
+          continue;
+        }
+      } catch (err) {
+        state.updateCase(c.id, {
+          status: 'crosscheck_error',
+          review_note: `Crosscheck error: ${err.message}`,
+        });
+        errors++;
+        console.error(`  Crosscheck query failed for ${c.id}: ${err.message}`);
+        continue;
+      }
+
+      state.updateCase(c.id, { status: 'import_ready' });
+      passed++;
+    }
   }
 
+  if (!drained) {
+    console.log('  No verified cases pending crosscheck.');
+    return {};
+  }
   console.log(`  Crosscheck done: ${passed} ready for import, ${dupes} duplicates skipped, ${errors} errors held back.`);
   return {};
 }
@@ -809,89 +826,95 @@ async function phaseCrosscheck(state, opts) {
 async function phaseImport(state, opts) {
   console.log('\n── Phase: IMPORT ──');
 
-  const cases = state.getCasesForImport(opts.batchSize, IMPORT_RETRY_LIMIT);
-  if (cases.length === 0) {
+  let imported = 0;
+  let failed = 0;
+  let drained = false;
+
+  // Drain the whole queue batch-by-batch — see phaseVerify for the rationale
+  // (verify now drains, so import must keep up in the same run).
+  while (!pastDeadline()) {
+    const cases = state.getCasesForImport(opts.batchSize, IMPORT_RETRY_LIMIT);
+    if (cases.length === 0) break;
+    drained = true;
+    const { supabaseUrl, supabaseKey } = requireSupabaseConfig('function');
+
+    for (const c of cases) {
+      if (pastDeadline()) break;
+      const payload = JSON.parse(c.payload_json);
+      state.updateCase(c.id, { import_attempts: (c.import_attempts ?? 0) + 1 });
+      const normalizedDescription = normalizeImportText(payload.description || '');
+      const normalizedResolution = normalizeImportText(payload.resolution || '');
+      const importResolution = clampResolutionForImport(normalizedResolution);
+      const sanitizationNote = importResolution !== normalizedResolution
+        ? `Resolution trimmed for import (${normalizedResolution.length} → ${importResolution.length})`
+        : null;
+
+      if (importResolution.length < RESOLUTION_MIN_LENGTH) {
+        state.updateCase(c.id, {
+          status: 'import_failed',
+          review_note: `Resolution too short for import after sanitization (${importResolution.length} < ${RESOLUTION_MIN_LENGTH})`,
+        });
+        failed++;
+        console.log(`  ✗ ${c.id.slice(0, 8)}: resolution too short`);
+        continue;
+      }
+
+      try {
+        // Inline canonicalization: new imports get the catalog's exact brand spelling
+        // (casing/diacritics/alias), so they are discoverable in the app from the start
+        // (search filters vehicle_brand by exact match). Model-level gaps stay as-is and
+        // are handled by the Phase-2 catalog-proposal flow, not silently remapped.
+        const _rawBrand = payload.vehicle_brand || payload.brand_raw || '';
+        const _veh = resolveVehicle({ vehicle_brand: _rawBrand, vehicle_model: payload.vehicle_model || payload.model_raw || '' });
+        const vehicleBrandCanonical = _veh.matched ? _veh.canonicalBrand : _rawBrand;
+        const res = await fetch(`${supabaseUrl}/functions/v1/push-case`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${supabaseKey}`,
+          },
+          body: JSON.stringify({
+            local_id: c.id,
+            user_id: 'ai_importer',
+            vehicle_brand: vehicleBrandCanonical,
+            vehicle_model: payload.vehicle_model || payload.model_raw || '',
+            engine_power: payload.engine_power || payload.engine_raw || '',
+            symptoms: payload.symptoms || [],
+            obd_codes: payload.obd_codes || [],
+            description: normalizedDescription,
+            resolution: importResolution,
+            source_ref: payload.source_ref || `agent:${c.id.slice(0, 12)}`,
+            thread_url: payload.thread_url || payload.source_url || '',
+          }),
+        });
+
+        if (res.ok) {
+          state.updateCase(c.id, {
+            status: 'imported',
+            review_note: sanitizationNote ? `Pushed to Supabase. ${sanitizationNote}` : 'Pushed to Supabase',
+          });
+          imported++;
+          console.log(`  ✓ ${c.id.slice(0, 8)}`);
+        } else {
+          const errBody = await res.text().catch(() => '');
+          state.updateCase(c.id, { status: 'import_failed', review_note: `HTTP ${res.status}: ${errBody.slice(0, 200)}` });
+          failed++;
+          console.log(`  ✗ ${c.id.slice(0, 8)}: HTTP ${res.status}`);
+        }
+      } catch (err) {
+        state.updateCase(c.id, { status: 'import_failed', review_note: `Error: ${err.message}` });
+        failed++;
+        console.error(`  ✗ ${c.id.slice(0, 8)}: ${err.message}`);
+      }
+
+      await sleep(500);
+    }
+  }
+
+  if (!drained) {
     console.log('  No cases ready for import.');
     return {};
   }
-
-  const { supabaseUrl, supabaseKey } = requireSupabaseConfig('function');
-
-  let imported = 0;
-  let failed = 0;
-
-  for (const c of cases) {
-    if (pastDeadline()) break;
-    const payload = JSON.parse(c.payload_json);
-    state.updateCase(c.id, { import_attempts: (c.import_attempts ?? 0) + 1 });
-    const normalizedDescription = normalizeImportText(payload.description || '');
-    const normalizedResolution = normalizeImportText(payload.resolution || '');
-    const importResolution = clampResolutionForImport(normalizedResolution);
-    const sanitizationNote = importResolution !== normalizedResolution
-      ? `Resolution trimmed for import (${normalizedResolution.length} → ${importResolution.length})`
-      : null;
-
-    if (importResolution.length < RESOLUTION_MIN_LENGTH) {
-      state.updateCase(c.id, {
-        status: 'import_failed',
-        review_note: `Resolution too short for import after sanitization (${importResolution.length} < ${RESOLUTION_MIN_LENGTH})`,
-      });
-      failed++;
-      console.log(`  ✗ ${c.id.slice(0, 8)}: resolution too short`);
-      continue;
-    }
-
-    try {
-      // Inline canonicalization: new imports get the catalog's exact brand spelling
-      // (casing/diacritics/alias), so they are discoverable in the app from the start
-      // (search filters vehicle_brand by exact match). Model-level gaps stay as-is and
-      // are handled by the Phase-2 catalog-proposal flow, not silently remapped.
-      const _rawBrand = payload.vehicle_brand || payload.brand_raw || '';
-      const _veh = resolveVehicle({ vehicle_brand: _rawBrand, vehicle_model: payload.vehicle_model || payload.model_raw || '' });
-      const vehicleBrandCanonical = _veh.matched ? _veh.canonicalBrand : _rawBrand;
-      const res = await fetch(`${supabaseUrl}/functions/v1/push-case`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${supabaseKey}`,
-        },
-        body: JSON.stringify({
-          local_id: c.id,
-          user_id: 'ai_importer',
-          vehicle_brand: vehicleBrandCanonical,
-          vehicle_model: payload.vehicle_model || payload.model_raw || '',
-          engine_power: payload.engine_power || payload.engine_raw || '',
-          symptoms: payload.symptoms || [],
-          obd_codes: payload.obd_codes || [],
-          description: normalizedDescription,
-          resolution: importResolution,
-          source_ref: payload.source_ref || `agent:${c.id.slice(0, 12)}`,
-          thread_url: payload.thread_url || payload.source_url || '',
-        }),
-      });
-
-      if (res.ok) {
-        state.updateCase(c.id, {
-          status: 'imported',
-          review_note: sanitizationNote ? `Pushed to Supabase. ${sanitizationNote}` : 'Pushed to Supabase',
-        });
-        imported++;
-        console.log(`  ✓ ${c.id.slice(0, 8)}`);
-      } else {
-        const errBody = await res.text().catch(() => '');
-        state.updateCase(c.id, { status: 'import_failed', review_note: `HTTP ${res.status}: ${errBody.slice(0, 200)}` });
-        failed++;
-        console.log(`  ✗ ${c.id.slice(0, 8)}: HTTP ${res.status}`);
-      }
-    } catch (err) {
-      state.updateCase(c.id, { status: 'import_failed', review_note: `Error: ${err.message}` });
-      failed++;
-      console.error(`  ✗ ${c.id.slice(0, 8)}: ${err.message}`);
-    }
-
-    await sleep(500);
-  }
-
   console.log(`  Import done: ${imported} imported, ${failed} failed.`);
   return { cases_imported: imported };
 }
