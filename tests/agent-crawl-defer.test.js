@@ -253,6 +253,9 @@ assert.equal(classifyDiscardReason(null), 'other', 'null → other');
     const raw = new DatabaseSync(dbPath2);
     raw.prepare("INSERT INTO threads (id, forum_id, url, status, revisit_after) VALUES (?,?,?,?,?)")
       .run('dupB', fid, 'https://x.example/viewtopic.php?f=1&t=7&sid=ZZZ', 'deferred', future);
+    // The legacy repair is one-shot (stamped in agent_meta) — clear the stamp so
+    // the reopen runs it, exactly like a canonicalization version bump would.
+    raw.prepare("DELETE FROM agent_meta WHERE key = 'legacy_repair_version'").run();
     raw.close();
     // Reopen → #repairLegacyThreads merges the canonical group.
     st = new AgentState(dbPath2);

@@ -91,6 +91,10 @@ try {
     }),
     'ai_approved'
   );
+  // The legacy repair is one-shot (stamped in agent_meta). Simulating an old
+  // database = injecting legacy rows AND clearing the stamp, so the next open
+  // runs the repair exactly like a version bump would.
+  legacyDb.prepare('DELETE FROM agent_meta WHERE key = ?').run('legacy_repair_version');
   legacyDb.close();
 
   state = new AgentState(dbPath);

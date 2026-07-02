@@ -199,6 +199,16 @@ CREATE INDEX IF NOT EXISTS idx_coach_journal_forum
   ON coach_journal(forum_id, date);
 `;
 
+// One-shot legacy repair versioning. #repairLegacyState used to run on EVERY
+// writable open — a full scan of all threads (incl. ~50 MB of thread_text into
+// the JS heap) plus an unconditional rewrite of every case row, paid by every
+// tool that opens the DB (orchestrator 6×/night + the whole morning coach
+// chain + manual tools). It is a data MIGRATION, not an invariant check: run it
+// once, stamp agent_meta, skip until the version is bumped. Bump the version
+// whenever canonicalization/repair rules change so the repair runs once more.
+const LEGACY_REPAIR_KEY = 'legacy_repair_version';
+const LEGACY_REPAIR_VERSION = 1;
+
 export class AgentState {
   #db;
   #readOnly = false;
@@ -248,7 +258,14 @@ export class AgentState {
     for (const sql of alterations) {
       try { this.#db.exec(sql); } catch { /* column already exists */ }
     }
-    this.#repairLegacyState();
+    if (Number(this.getMeta(LEGACY_REPAIR_KEY)) !== LEGACY_REPAIR_VERSION) {
+      this.#repairLegacyState();
+      this.setMeta(LEGACY_REPAIR_KEY, String(LEGACY_REPAIR_VERSION));
+    }
+    // Cheap crash-recovery invariant (quota-interrupted calibration), NOT a
+    // one-time migration — runs on every writable open, unlike the stamped
+    // legacy repair above.
+    this.#repairCalibrationState();
   }
 
   close() {
@@ -927,7 +944,6 @@ export class AgentState {
     try {
       this.#repairLegacyThreads();
       this.#repairLegacyCases();
-      this.#repairCalibrationState();
       this.#db.exec('COMMIT');
     } catch (err) {
       this.#db.exec('ROLLBACK');

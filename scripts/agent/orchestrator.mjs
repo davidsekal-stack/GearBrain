@@ -527,10 +527,15 @@ async function phaseCrawl(state, opts) {
         }
 
         if (result.skipped) {
+          // No thread_text on discards (mirrors the deferred path): nothing
+          // ever reads it again — every consumer (verify, triage, audits)
+          // reaches thread_text via cases, and discarded threads have none.
+          // Storing it grew agent.db by ~5 MB/night (33 MB of dead text by
+          // 2026-07). A later re-judge (recover/revive) re-fetches anyway.
           state.updateThread(threadId, {
             status: 'discarded',
             discard_reason: result.skipped,
-            thread_text: result.threadText || null,
+            thread_text: null,
             title: result.title || null,
           });
           continue;
