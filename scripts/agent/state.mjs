@@ -527,22 +527,6 @@ export class AgentState {
     return stmt.all(status, limit);
   }
 
-  getClassifiedThreads(limit = 50) {
-    const stmt = this.#db.prepare(
-      `SELECT * FROM threads WHERE status = 'classified'
-       ORDER BY created_at LIMIT ?`
-    );
-    return stmt.all(limit);
-  }
-
-  getExtractedThreads(limit = 50) {
-    const stmt = this.#db.prepare(
-      `SELECT * FROM threads WHERE status = 'extracted'
-       ORDER BY created_at LIMIT ?`
-    );
-    return stmt.all(limit);
-  }
-
   countThreadsByStatus() {
     const stmt = this.#db.prepare(
       'SELECT status, COUNT(*) as count FROM threads GROUP BY status'
