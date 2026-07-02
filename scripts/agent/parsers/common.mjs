@@ -845,6 +845,21 @@ export function findNextPageLink(html, baseUrl, paginationSelector) {
     /<a\b[^>]*rel=(?:"|')next(?:"|')[^>]*href=(?:"|')([^"']+)(?:"|')/i,
     /<a\b[^>]*href=(?:"|')([^"']+)(?:"|')[^>]*rel=(?:"|')next(?:"|')/i,
     /<li\b[^>]*class=(?:"|')[^"']*\bnext\b[^"']*(?:"|')[^>]*>\s*<a\b[^>]*href=(?:"|')([^"']+)(?:"|')/i,
+    // <link rel="next"> in the document head. WoltLab (RenaultForum.net,
+    // PeugeotTalk.de, MeinID) publishes listing/thread pagination ONLY here —
+    // its body next-button carries no matchable class/rel, so sections were
+    // marked "done" after page 1 (false "archive complete", review 2026-07-02).
+    /<link\b[^>]*rel=(?:"|')next(?:"|')[^>]*href=(?:"|')([^"']+)(?:"|')/i,
+    /<link\b[^>]*href=(?:"|')([^"']+)(?:"|')[^>]*rel=(?:"|')next(?:"|')/i,
+    // SMF (PeugeotClub Slovakia): the next-page link is the navPages anchor
+    // whose text is the » glyph. Numbered navPages anchors must NOT match —
+    // only the explicit »/&raquo; one.
+    /<a\b[^>]*class=(?:"|')[^"']*\bnavPages\b[^"']*(?:"|')[^>]*href=(?:"|')([^"']+)(?:"|')[^>]*>\s*(?:»|&raquo;|&#187;)/i,
+    // Weakest heuristic LAST: a next button marked only by its text label
+    // (kia-club.org phpBB skin: <a href="...&start=25" class="right-box">Další).
+    // The href must look like pagination (start=/offset=/page…) so ordinary
+    // "next topic"-style links can never match.
+    /<a\b[^>]*href=(?:"|')([^"']*(?:[?&;](?:start|offset)=\d|[?&;]page(?:no)?=\d|\/page\d|page\d+\.html)[^"']*)(?:"|')[^>]*>(?:\s|&nbsp;|<span[^>]*>|<i[^>]*>|<b[^>]*>)*(?:Další|Ďalej|Ďalšia|Weiter|Nächste|Next|Suivant|›|»|&raquo;|&#187;|&rsaquo;)/i,
   ];
 
   for (const p of patterns) {

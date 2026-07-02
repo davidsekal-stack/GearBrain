@@ -1741,13 +1741,13 @@
         "Volkswagen"
       ],
       "sections": [
-        "https://www.motor-talk.de/forum/vw-golf-1-2-b145.html",
-        "https://www.motor-talk.de/forum/vw-golf-3-b146.html",
-        "https://www.motor-talk.de/forum/vw-golf-4-b147.html",
-        "https://www.motor-talk.de/forum/vw-golf-5-b217.html",
-        "https://www.motor-talk.de/forum/vw-golf-6-b729.html",
-        "https://www.motor-talk.de/forum/vw-golf-7-golf-sportsvan-b848.html",
-        "https://www.motor-talk.de/forum/vw-golf-8-b1083.html"
+        "https://www.motor-talk.de/forum/vw-golf-1-2-b145.html?page=1",
+        "https://www.motor-talk.de/forum/vw-golf-3-b146.html?page=1",
+        "https://www.motor-talk.de/forum/vw-golf-4-b147.html?page=1",
+        "https://www.motor-talk.de/forum/vw-golf-5-b217.html?page=1",
+        "https://www.motor-talk.de/forum/vw-golf-6-b729.html?page=1",
+        "https://www.motor-talk.de/forum/vw-golf-7-golf-sportsvan-b848.html?page=1",
+        "https://www.motor-talk.de/forum/vw-golf-8-b1083.html?page=1"
       ],
       "calibration": {
         "post_selector": ".Post",
@@ -1757,7 +1757,7 @@
         "thread_url_pattern": "-t\\d+\\.html",
         "max_section_pages": 10
       },
-      "notes": "Custom CMS (Polly), server-rendered, plain fetch works (no browser, no login). FIX: the earlier profiled sections (vw-motoren-b62 etc.) were CATEGORY pages listing sub-forums. The ACTUAL leaf boards that LIST THREADS are the per-generation Golf boards reachable from the vw-golf-b60 category: vw-golf-1-2-b145, vw-golf-3-b146, vw-golf-4-b147, vw-golf-5-b217, vw-golf-6-b729, vw-golf-7-golf-sportsvan-b848, vw-golf-8-b1083. Each lists ~48-55 thread links per page with ?page=N pagination. Thread URLs are /forum/<slug>-t<digits>.html — the generic isLikelyThreadUrl does NOT recognize this shape, so thread_url_pattern=\"-t\\d+\\.html\" is REQUIRED (without it enumeration yields 0). Posts: <section class=\"Post\"> with author in .PostHeader-nickName and body in .PostBody. IMPORTANT: replies are wrapped in <div class=\"ReplyList-post\"> — the regex-based generic parser's selectByClass mis-matches that wrapper (case-insensitive \\bpost\\b) and truncates replies, so it would return only the OP. The crawl's parseHtml uses the robust selectPosts tokenizer first whenever post_selector is set (selected.length>=2), which correctly returns all posts; keep post_selector so that path is taken. quote_selector=\"blockquote\" strips the 'Zitat: @user schrieb am...' quote noise. Verified: enumerateThreadUrls over the 7 boards returned 30 real -t<digits>.html threads (0 non-matching, all repair topics); sample threads t8583481 (Golf 2, 5 posts) and t8591738 (Golf 3, 4 posts) parsed with non-empty authors and clean German text via the production parseHtml/selectPosts path."
+      "notes": "Custom CMS (Polly), server-rendered, plain fetch works (no browser, no login). FIX: the earlier profiled sections (vw-motoren-b62 etc.) were CATEGORY pages listing sub-forums. The ACTUAL leaf boards that LIST THREADS are the per-generation Golf boards reachable from the vw-golf-b60 category: vw-golf-1-2-b145, vw-golf-3-b146, vw-golf-4-b147, vw-golf-5-b217, vw-golf-6-b729, vw-golf-7-golf-sportsvan-b848, vw-golf-8-b1083. Each lists ~48-55 thread links per page with ?page=N pagination. PAGINATION GOTCHA (2026-07-02): the bare board URL (no ?page=) lands on the LAST page, which has only rel=prev/first — findNextPageLink finds no next and the deep walk marked every section done after 1 page (false 'archive complete'). Sections therefore start at ?page=1 explicitly; from there rel=next chains through the whole archive. Thread URLs are /forum/<slug>-t<digits>.html — the generic isLikelyThreadUrl does NOT recognize this shape, so thread_url_pattern=\"-t\\d+\\.html\" is REQUIRED (without it enumeration yields 0). Posts: <section class=\"Post\"> with author in .PostHeader-nickName and body in .PostBody. IMPORTANT: replies are wrapped in <div class=\"ReplyList-post\"> — the regex-based generic parser's selectByClass mis-matches that wrapper (case-insensitive \\bpost\\b) and truncates replies, so it would return only the OP. The crawl's parseHtml uses the robust selectPosts tokenizer first whenever post_selector is set (selected.length>=2), which correctly returns all posts; keep post_selector so that path is taken. quote_selector=\"blockquote\" strips the 'Zitat: @user schrieb am...' quote noise. Verified: enumerateThreadUrls over the 7 boards returned 30 real -t<digits>.html threads (0 non-matching, all repair topics); sample threads t8583481 (Golf 2, 5 posts) and t8591738 (Golf 3, 4 posts) parsed with non-empty authors and clean German text via the production parseHtml/selectPosts path."
     },
     {
       "match": "peugeottalk.de",

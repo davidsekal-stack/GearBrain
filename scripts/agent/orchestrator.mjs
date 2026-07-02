@@ -431,6 +431,7 @@ async function phaseCrawl(state, opts) {
     // low, so the pending queue stays bounded.
     let cursor = safeJsonParse(forum.archive_cursor_json);
     if (!cursor || !cursor.sections) cursor = { sections: {}, complete: false };
+    const wasComplete = !!cursor.complete;
     const queueFloor = Math.max(opts.batchSize * 2, 20);
     let pendingCount = state.countPendingThreads(forum.id);
 
@@ -445,6 +446,24 @@ async function phaseCrawl(state, opts) {
         });
         cursor = walk.cursor;
         state.updateForum(forum.id, { archive_cursor_json: JSON.stringify(cursor) });
+
+        // ── False-complete audit ──
+        // A section is "done" the moment findNextPageLink returns null, so an
+        // undetected pagination pattern silently declares a whole forum's
+        // archive mined after ~1 page per section (seen on WoltLab/SMF:
+        // RenaultForum 43 sections × 1 page). Completing with barely more
+        // pages than sections is that signature — warn loudly instead of
+        // parking the forum for 30 days in silence.
+        if (cursor.complete && !wasComplete) {
+          const secCount = Object.keys(cursor.sections || {}).length;
+          const totalPages = Object.values(cursor.sections || {})
+            .reduce((a, s) => a + (s?.pages || 0), 0);
+          if (secCount > 0 && totalPages <= secCount + 2) {
+            const msg = `archive marked complete after only ${totalPages} listing page(s) across ${secCount} section(s) — pagination likely undetected (false complete); check section_pagination_selector / findNextPageLink for this engine`;
+            console.warn(`  ⚠ ${forum.url}: ${msg}`);
+            state.log('warn', `${forum.url}: ${msg}`, 'crawl');
+          }
+        }
       } else if (cursor.complete && pendingCount === 0) {
         // Archive done → shallow head-scan for brand-new threads (the cherry).
         walk = await enumerateThreadUrlsDeep(forum, calibration, {
