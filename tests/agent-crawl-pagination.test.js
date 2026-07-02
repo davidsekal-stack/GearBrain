@@ -111,4 +111,39 @@ assert.equal(
   'text-next never matches non-pagination hrefs or bare numbers'
 );
 
+// ── Numbered pagination (Snitz / BMW-Syndikat: no "next" anchor) ─────────────
+// Off by default (opts.numbered absent) — the numbered links must NOT be taken.
+const snitz = `
+  <a class="mobile_big_paging" href="forum70w2_Codierung.html" title="Seite 2">2</a>
+  <a class="mobile_big_paging" href="forum70w3_Codierung.html" title="Seite 3">3</a>
+  <a class="mobile_big_paging" href="forum70w133_Codierung.html" title="Seite 133">133</a>
+`;
+assert.equal(
+  findNextPageLink(snitz, 'https://bmw-syndikat.de/forum70_Codierung.html'),
+  null,
+  'numbered links are NOT followed unless the profile opts in',
+);
+// Opted in: page 1 (no wN) → next is w2.
+assert.equal(
+  findNextPageLink(snitz, 'https://bmw-syndikat.de/forum70_Codierung.html', null, { numbered: true, numberRe: 'w(\\d+)_' }),
+  'https://bmw-syndikat.de/forum70w2_Codierung.html',
+  'numbered: page 1 → w2 (current+1)',
+);
+// On page 2 → next is w3 (not w133, not w2 again — must be exactly current+1).
+assert.equal(
+  findNextPageLink(snitz, 'https://bmw-syndikat.de/forum70w2_Codierung.html', null, { numbered: true, numberRe: 'w(\\d+)_' }),
+  'https://bmw-syndikat.de/forum70w3_Codierung.html',
+  'numbered: page 2 → w3',
+);
+// Last page: no current+1 candidate → null → section done (no infinite loop).
+assert.equal(
+  findNextPageLink(
+    `<a class="mobile_big_paging" href="forum70w132_Codierung.html">132</a>`,
+    'https://bmw-syndikat.de/forum70w133_Codierung.html', null,
+    { numbered: true, numberRe: 'w(\\d+)_' },
+  ),
+  null,
+  'numbered: last page has no current+1 link → done',
+);
+
 console.log('agent-crawl-pagination.test.js passed');

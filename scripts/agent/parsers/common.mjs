@@ -888,7 +888,44 @@ function resolvePageLink(href, baseUrl) {
   }
 }
 
-export function findNextPageLink(html, baseUrl, paginationSelector) {
+/**
+ * Numbered-pagination resolver for engines that render numbered page links but
+ * NO "next"/rel=next anchor (e.g. Snitz on BMW-Syndikat: page 1 = forum70_…html,
+ * page N = forum70w{N}_…html). OFF by default — only used when a forum profile
+ * sets `pagination_mode: 'numbered'`, so the 53 other forums are unaffected.
+ *
+ * It reads the CURRENT page number from `currentUrl` via `numberRe` (default the
+ * Snitz `w{N}_` token; profiles can override), then returns the candidate link
+ * whose page number is current+1. No such candidate ⇒ last page ⇒ null.
+ */
+export function nextNumberedPageUrl(html, currentUrl, { selector, numberRe } = {}) {
+  let re;
+  try { re = numberRe ? new RegExp(numberRe) : /w(\d+)_/; } catch { re = /w(\d+)_/; }
+  const curMatch = String(currentUrl ?? '').match(re);
+  const want = (curMatch ? Number(curMatch[1]) : 1) + 1;
+
+  const sels = (selector ?? '').toString().split(',').map(s => s.trim()).filter(Boolean)
+    .flatMap(s => [s, `${s} a`]);
+
+  for (const anchor of collectAnchorsWithAncestors(html)) {
+    if (sels.length && !sels.some(s => selectorMatchesAnchor(s, anchor.attrText, anchor.ancestorStack))) continue;
+    const href = decodeHtmlAttribute(parseTagAttrs(anchor.attrText).get('href') ?? '');
+    if (!href) continue;
+    const m = href.match(re);
+    if (m && Number(m[1]) === want) {
+      const resolved = resolvePageLink(href, currentUrl);
+      if (resolved) return resolved;
+    }
+  }
+  return null;
+}
+
+export function findNextPageLink(html, baseUrl, paginationSelector, opts = {}) {
+  // Numbered engines (no next-anchor) opt in via the profile — handle first.
+  if (opts.numbered) {
+    const n = nextNumberedPageUrl(html, baseUrl, { selector: paginationSelector, numberRe: opts.numberRe });
+    if (n) return n;
+  }
   const selectors = (paginationSelector ?? '')
     .toString()
     .split(',')

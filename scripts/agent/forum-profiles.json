@@ -32,10 +32,12 @@
         "author_selector": "span.forum_show_headline1 a",
         "content_selector": "div.forum_show_main_top",
         "thread_url_pattern": "/topic\\d+_.*\\.html",
+        "pagination_mode": "numbered",
+        "pagination_number_re": "w(\\d+)_",
         "min_post_length": 25,
         "max_section_pages": 10
       },
-      "notes": "Legacy ASP fórum (Snitz-like), DIV skin, server-rendered (bez JS), bez loginu. Vlákna: /bmwsyndikatforum/topic{N}_{titulek}.html (bez lomítka za 'topic' → generický isLikelyThreadUrl je nepozná, proto thread_url_pattern). Sekce: forum{N}_*.html. SPECIFIKUM: autor (span.forum_show_headline1 a) je v hlavičce div.headline_big_show TĚSNĚ PŘED tělem div.forum_show_outer — proto header_selector. Zpráva je v div.forum_show_main_top (mimo postranní panel a signaturu). Šum (reklama 'Ad-Boy', box 'Ähnliche Beiträge' s prázdným autorem) extrakce ignoruje. Kódování ISO-8859-1 (umlauty zkomolené, neblokuje). force_browser NENÍ potřeba."
+      "notes": "Legacy ASP fórum (Snitz-like), DIV skin, server-rendered (bez JS), bez loginu. Vlákna: /bmwsyndikatforum/topic{N}_{titulek}.html (bez lomítka za 'topic' → generický isLikelyThreadUrl je nepozná, proto thread_url_pattern). Sekce: forum{N}_*.html. STRÁNKOVÁNÍ: číslované odkazy bez 'next' anchoru — strana 1 = forum{N}_*.html, strana K = forum{N}w{K}_*.html; proto pagination_mode='numbered' + pagination_number_re='w(\\d+)_' (deep walk odvodí další stránku jako aktuální+1). Bez toho se sekce označí 'done' po 1. straně (falešně vytěženo). SPECIFIKUM: autor (span.forum_show_headline1 a) je v hlavičce div.headline_big_show TĚSNĚ PŘED tělem div.forum_show_outer — proto header_selector. Zpráva je v div.forum_show_main_top (mimo postranní panel a signaturu). Šum (reklama 'Ad-Boy', box 'Ähnliche Beiträge' s prázdným autorem) extrakce ignoruje. Kódování ISO-8859-1 (umlauty zkomolené, neblokuje). force_browser NENÍ potřeba."
     },
     {
       "match": "audidrivers.de",
