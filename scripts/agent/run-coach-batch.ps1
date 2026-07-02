@@ -6,7 +6,7 @@ param(
 
 # Dedicated post-night runner for the recall watchdog + daily coach.
 # Fires ONCE per morning from the DriveCodexDailyCoach scheduled task (~06:20),
-# AFTER the 21:00–06:00 crawl window closes — so the coach evaluates the full,
+# AFTER the 22:00–06:00 crawl window closes — so the coach evaluates the full,
 # just-finished night (the 5-min crawl batch can't: it only runs inside the window).
 # Both scripts self-gate to once/local-day; this wrapper just runs them, captures
 # output, and mirrors the watchdog's alert file to a Desktop marker.
@@ -96,6 +96,80 @@ $loaded = Import-DotEnv -Path (Join-Path $agentDir '.env.local')
 if ($loaded -gt 0) { Write-LogLine -Path $logPath -Message ("Loaded {0} secret(s) from .env.local." -f $loaded) }
 Write-LogLine -Path $logPath -Message "START coach batch."
 
+$desktopDir = [Environment]::GetFolderPath('Desktop')
+
+# ── Alarm: did the PREVIOUS morning chain actually finish? ──
+# The scheduler used to kill this chain at its old 1h ExecutionTimeLimit every
+# day (LastTaskResult 267014) and nothing noticed — guarded recalibration was
+# silently dead for days. A running-marker is written at START and removed after
+# END; finding one >20h old means the previous chain died mid-flight.
+$coachRunningFile = Join-Path $agentDir 'coach-running.txt'
+try {
+  if ($desktopDir -and (Test-Path $coachRunningFile)) {
+    $ageHours = ((Get-Date) - (Get-Item $coachRunningFile).LastWriteTime).TotalHours
+    if ($ageHours -gt 20) {
+      $coachDeadMarker = Join-Path $desktopDir 'DRIVECODEX-RANNI-KONTROLA-NEDOBEHLA-PRECTI-ME.txt'
+      $deadText = @"
+DriveCodex — vcerejsi ranni kontrolni davka (coach) NEDOBEHLA do konce.
+Bezela dele nez limit ulohy, nebo spadla — cast rannich kroku (triaz, rekalibrace) se neprovedla.
+
+Co s tim:
+  1. Otevrete Claude Code v projektu C:\GB
+  2. Napiste: "ranni davka coach nedobehla, zkontroluj to"
+
+Tento soubor zmizi sam, jakmile ranni davka zase dobehne cela.
+(Vytvoril: scripts\agent\run-coach-batch.ps1)
+"@
+      Set-Content -Path $coachDeadMarker -Value $deadText -Encoding utf8
+      Write-LogLine -Path $logPath -Message ("ALARM: previous coach chain never finished (running-marker {0:N1}h old); desktop marker created." -f $ageHours)
+    }
+  }
+  Set-Content -Path $coachRunningFile -Value ((Get-Date).ToString('o')) -Encoding utf8
+} catch {
+  Write-LogLine -Path $logPath -Message ("WARN: coach running-marker handling failed ({0}); ignoring." -f $_.Exception.Message)
+}
+
+# ── Cross-check: did the night crawler run at all? ──
+# The crawler's stall alarm is written BY its own wrapper — if the scheduled
+# task is disabled/deregistered or never fires, no wrapper runs and no alarm
+# is ever written. This independent morning check covers that blind spot.
+try {
+  if ($desktopDir) {
+    $crawlerStaleMarker = Join-Path $desktopDir 'DRIVECODEX-NOCNI-CRAWL-NEBEZEL-PRECTI-ME.txt'
+    $lastSuccessRaw = $null
+    $lastSuccessPath = Join-Path $agentDir 'last-success.txt'
+    if (Test-Path $lastSuccessPath) {
+      $lastSuccessRaw = Get-Content $lastSuccessPath -TotalCount 1 -ErrorAction SilentlyContinue
+    }
+    $anchor = [datetimeoffset]::MinValue
+    if ($lastSuccessRaw -and [datetimeoffset]::TryParse($lastSuccessRaw.Trim(), [ref]$anchor)) {
+      $hoursSince = ([datetimeoffset]::UtcNow - $anchor.ToUniversalTime()).TotalHours
+      if ($hoursSince -gt 30) {
+        $staleText = @"
+DriveCodex — nocni crawl podle vseho vubec nebezel (posledni uspesny beh pred vice nez 30 hodinami).
+Mozna je vypnuta/odregistrovana uloha DriveCodexAgentBatch v Planovaci uloh, nebo byl pocitac v noci vypnuty.
+
+Posledni uspesny beh: $($lastSuccessRaw.Trim())
+
+Co s tim:
+  1. Otevrete Claude Code v projektu C:\GB
+  2. Napiste: "nocni crawl nebezel, zkontroluj planovac"
+
+Tento soubor zmizi sam, jakmile nocni crawl zase pobezi.
+(Vytvoril: scripts\agent\run-coach-batch.ps1)
+"@
+        Set-Content -Path $crawlerStaleMarker -Value $staleText -Encoding utf8
+        Write-LogLine -Path $logPath -Message ("ALARM: night-crawler heartbeat is {0:N1}h old; desktop marker created." -f $hoursSince)
+      } elseif (Test-Path $crawlerStaleMarker) {
+        Remove-Item $crawlerStaleMarker -Force -ErrorAction SilentlyContinue
+        Write-LogLine -Path $logPath -Message "Night-crawler heartbeat fresh again; stale marker removed."
+      }
+    }
+  }
+} catch {
+  Write-LogLine -Path $logPath -Message ("WARN: night-crawl heartbeat check failed ({0}); ignoring." -f $_.Exception.Message)
+}
+
 # Order (cheapest-to-lose first; the precision DAY is claimed by the auditor only on a
 # clean run, so a mid-run cap retries tomorrow):
 #  1) recall watchdog (verifier over-rejection check)
@@ -114,7 +188,6 @@ Invoke-NodeStep -NodeExe $nodeExe -Script (Join-Path $agentDir 'precision-audito
 Invoke-NodeStep -NodeExe $nodeExe -Script (Join-Path $agentDir 'alert-agent.mjs')        -LogPath $logPath -RepoRoot $repoRoot -Label 'alert agent'
 
 # Mirror the watchdog's alert file to a Desktop marker (present → ensure; absent → remove).
-$desktopDir = [Environment]::GetFolderPath('Desktop')
 if ($desktopDir) {
   $recallAlertFile = Join-Path $agentDir 'recall-alert.txt'
   $recallMarker = Join-Path $desktopDir 'DRIVECODEX-VERIFIKATOR-PRISNY-PRECTI-ME.txt'
@@ -193,3 +266,15 @@ if ($script:StoppingHit) {
 }
 
 Write-LogLine -Path $logPath -Message "END coach batch."
+
+# Clean finish → drop the running-marker and any "chain never finished" alarm.
+try {
+  Remove-Item $coachRunningFile -Force -ErrorAction SilentlyContinue
+  if ($desktopDir) {
+    $coachDeadMarkerEnd = Join-Path $desktopDir 'DRIVECODEX-RANNI-KONTROLA-NEDOBEHLA-PRECTI-ME.txt'
+    if (Test-Path $coachDeadMarkerEnd) {
+      Remove-Item $coachDeadMarkerEnd -Force -ErrorAction SilentlyContinue
+      Write-LogLine -Path $logPath -Message "Recovered: coach never-finished marker removed."
+    }
+  }
+} catch { }

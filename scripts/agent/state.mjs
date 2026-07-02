@@ -206,6 +206,11 @@ export class AgentState {
   constructor(dbPath = DEFAULT_DB_PATH, options = {}) {
     this.#readOnly = options.readOnly === true;
     this.#db = new DatabaseSync(dbPath, { readOnly: this.#readOnly });
+    // Concurrent openers exist by design (orchestrator tail vs the 06:20 coach
+    // chain vs manual tools). Wait for a busy writer instead of throwing
+    // SQLITE_BUSY instantly — a BEGIN IMMEDIATE collision used to crash the
+    // coach mid-chain and that morning's report/adapt silently didn't happen.
+    this.#db.exec('PRAGMA busy_timeout=30000');
     if (!this.#readOnly) {
       this.#db.exec('PRAGMA journal_mode=WAL');
       this.#db.exec('PRAGMA foreign_keys=ON');

@@ -69,6 +69,19 @@ const LOCAL_DUPLICATE_STATUSES = new Set(['verified', 'import_ready', 'imported'
 // is skipped and the wrapper's stall alarm reaches the owner.
 const AUTH_EXIT_CODE = 76;
 
+// ── Night-window deadline ──
+// The nightly wrapper (run-agent-batch.ps1) passes AGENT_DEADLINE_EPOCH_MS =
+// window end (06:00) minus a safety margin. Task Scheduler's StopAtDurationEnd
+// kills only the PowerShell wrapper — the node child survived it and kept
+// crawling unsupervised past 06:00, overlapping the 06:20 coach chain on the
+// same agent.db (SQLITE_BUSY risk; 17 dangling runs rows). Past the deadline
+// the orchestrator stops STARTING new work and exits cleanly. No env var → no
+// deadline (manual daytime runs are unaffected).
+const RUN_DEADLINE_MS = Number(process.env.AGENT_DEADLINE_EPOCH_MS) || null;
+function pastDeadline() {
+  return RUN_DEADLINE_MS !== null && Date.now() >= RUN_DEADLINE_MS;
+}
+
 // ---------------------------------------------------------------------------
 // CLI args
 // ---------------------------------------------------------------------------
@@ -396,6 +409,10 @@ async function phaseCrawl(state, opts) {
   let totalCases = 0;
 
   for (const forum of ready) {
+    if (pastDeadline()) {
+      console.log('  ⏱ Window deadline reached — stopping crawl cleanly (remaining forums next run).');
+      break;
+    }
     console.log(`  Crawling: ${forum.name || forum.url}`);
     const calibration = safeJsonParse(forum.calibration_json);
 
@@ -464,6 +481,10 @@ async function phaseCrawl(state, opts) {
     let batchCases = 0;
     let deferredCount = 0;
     for (const t of queue) {
+      if (pastDeadline()) {
+        console.log('  ⏱ Window deadline reached — leaving remaining queued threads pending.');
+        break;
+      }
       const threadId = t.id;
       const url = t.url;
       processedUrls.push(url);
@@ -640,6 +661,7 @@ async function phaseVerify(state, opts) {
   let failed = 0;
 
   for (const c of cases) {
+    if (pastDeadline()) break;
     const payload = JSON.parse(c.payload_json);
     state.updateCase(c.id, { verify_attempts: (c.verify_attempts ?? 0) + 1 });
 
@@ -699,6 +721,7 @@ async function phaseCrosscheck(state, opts) {
   let errors = 0;
 
   for (const c of cases) {
+    if (pastDeadline()) break;
     const payload = JSON.parse(c.payload_json);
     state.updateCase(c.id, { crosscheck_attempts: (c.crosscheck_attempts ?? 0) + 1 });
 
@@ -774,6 +797,7 @@ async function phaseImport(state, opts) {
   let failed = 0;
 
   for (const c of cases) {
+    if (pastDeadline()) break;
     const payload = JSON.parse(c.payload_json);
     state.updateCase(c.id, { import_attempts: (c.import_attempts ?? 0) + 1 });
     const normalizedDescription = normalizeImportText(payload.description || '');
@@ -948,6 +972,10 @@ async function runOnce(state, opts) {
     const phases = opts.phase ? [opts.phase] : ['discover', 'calibrate', 'crawl', 'verify', 'crosscheck', 'import'];
 
     for (const phase of phases) {
+      if (pastDeadline()) {
+        console.log(`\n  ⏱ Window deadline reached — skipping remaining phases (they resume next run).`);
+        break;
+      }
       setLogPhase(phase);
       let phaseStats = null;
       switch (phase) {
