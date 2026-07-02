@@ -102,4 +102,61 @@ const grounded = validateCase(
 );
 assert.equal(grounded.valid, true, 'vehicle named in the owner fault post is grounded → valid');
 
+// ── Confirmation-quote anchor (clause d): owner confirmed the fix worked ───────
+// helperThread post 3 (Alice, the owner): "...the problem is gone, thanks."
+
+// Valid: confirmation cites the owner's own post with a verbatim quote.
+const confOk = validateCase(
+  {
+    ...baseCase, fault_post_numbers: [1], resolution_post_numbers: [2],
+    confirmation_post_number: 3, confirmation_quote: 'the problem is gone, thanks',
+  },
+  { threadText: helperThread },
+);
+assert.equal(confOk.valid, true, 'owner confirmation with a verbatim quote is valid');
+
+// Borrowed confirmation: quote attributed to a post that is NOT the owner's → reject.
+const confBorrowed = validateCase(
+  {
+    ...baseCase, fault_post_numbers: [1], resolution_post_numbers: [2],
+    confirmation_post_number: 2, confirmation_quote: 'that fixed mine and a few others here',
+  },
+  { threadText: helperThread },
+);
+assert.equal(confBorrowed.valid, false, 'confirmation from a different user (borrowed) is rejected');
+assert.match(confBorrowed.reason, /borrowed confirmation|not the case owner/i);
+
+// Fabricated quote: not a verbatim excerpt of the cited post → reject.
+const confFabricated = validateCase(
+  {
+    ...baseCase, fault_post_numbers: [1], resolution_post_numbers: [2],
+    confirmation_post_number: 3, confirmation_quote: 'runs perfectly now and passed the MOT',
+  },
+  { threadText: helperThread },
+);
+assert.equal(confFabricated.valid, false, 'fabricated confirmation quote is rejected');
+assert.match(confFabricated.reason, /not a verbatim excerpt|fabrication/i);
+
+// Partial claim (post number without a quote) → reject.
+const confPartial = validateCase(
+  {
+    ...baseCase, fault_post_numbers: [1], resolution_post_numbers: [2],
+    confirmation_post_number: 3, confirmation_quote: '',
+  },
+  { threadText: helperThread },
+);
+assert.equal(confPartial.valid, false, 'confirmation with a post but no quote is rejected');
+assert.match(confPartial.reason, /incomplete/i);
+
+// Missing confirmation entirely → NOT blocked here (verify.mjs decides), just warns.
+const confMissing = validateCase(
+  { ...baseCase, fault_post_numbers: [1], resolution_post_numbers: [2] },
+  { threadText: helperThread },
+);
+assert.equal(confMissing.valid, true, 'missing confirmation is deferred to verify.mjs, not blocked');
+assert.ok(
+  confMissing.warnings.some(w => /confirmation/i.test(w)),
+  'a missing confirmation is flagged as a warning',
+);
+
 console.log('agent-validate-evidence.test.js passed');
