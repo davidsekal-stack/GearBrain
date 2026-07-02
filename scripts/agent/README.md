@@ -1,6 +1,7 @@
 # Autonomous Crawl Agent Notes
 
-Reviewed: 2026-06-10 (Claude-first LLM routing + usage-limit pause/resume)
+Reviewed: 2026-07-02 (deep pipeline review → clause-(d) tightening, night-window
+deadline, queue drain, false-complete pagination fixes, one-shot legacy repair)
 
 ## What This Folder Is
 
@@ -185,7 +186,7 @@ false/missing/non-boolean key → `FAIL`:
 | `vehicle_matches_cited_posts` | case vehicle ≠ the vehicle in the cited fault/resolution posts (multi-vehicle thread bleed) |
 | `is_genuine_fault` | config/menu questions, parts-fitment/where-to-buy, elective upgrades/retrofits/coding-activation, third-party-gadget firmware, preventive-maintenance opinion |
 | `repair_performed` | "fixed itself" / "resolved on its own" — no repair action |
-| `repair_confirmed` | outcome unknown, fault returned, or root cause never found |
+| `repair_confirmed` | outcome unknown/never stated, confirmation borrowed from another user's OWN car, fault returned, or root cause never found |
 | `actionable` | symptoms/resolution too vague to act on |
 
 Key design points (see the prompt in `verify.mjs`):
@@ -207,6 +208,18 @@ Key design points (see the prompt in `verify.mjs`):
 - The classifier (`classify.mjs`) `has_explicit_fault` definition was tightened in
   lockstep to drop the non-fault classes one stage earlier; the verifier is the
   authoritative gate, the human review queue is the final backstop.
+- **Clause-(d) tightening (2026-07-02).** The precision auditor measured 28/70
+  wrongly-approved cases over 7 days, 75 % failing on "repair confirmed". Root
+  cause: condition 5 accepted a confirmation from "a later reply about the same
+  car", which the verifier read as *any* later "worked for me" — including other
+  users reporting success on THEIR OWN car — and it never rejected outcome-never-
+  stated repairs (1 rejection in 14 days). Now, uniformly across `verify.mjs`
+  condition 5, `quality-bar.mjs` clause (d), and `classify.mjs`
+  `has_confirmed_resolution`: the repair may be CARRIED OUT by anyone (owner
+  decision of 2026-06-23 stands), but the OUTCOME CONFIRMATION must be a later
+  post by the case author explicitly saying the fault is gone. Another user's
+  own-car success is corroboration, not confirmation; a repair described or paid
+  for with no stated outcome is not confirmed.
 
 Validated against a 67-case live regression (the imports from the prior night):
 caught **8/8** known-bad cases, **0** false-rejects on 50 confirmed-good cases,
@@ -226,6 +239,25 @@ If a case looks duplicated, it is not imported.
 Also implemented in [`orchestrator.mjs`](/C:/GB/scripts/agent/orchestrator.mjs).
 
 `import_ready` cases are pushed to the Supabase edge function `push-case`.
+
+### Queue drain + night-window deadline (2026-07)
+
+Verify, crosscheck, and import each **drain their whole queue** batch-by-batch
+per run (previously one batch of `--batch-size` per run — verify's 20/run ≈
+120/night was below the ~140/night extraction rate, so an `ai_approved` backlog
+grew unboundedly and the night report showed "verified: 0" for work that
+happened nights later). Termination is guaranteed: every processed case changes
+status or exhausts its retry attempts.
+
+The nightly wrapper passes `AGENT_DEADLINE_EPOCH_MS` (window end 06:00 minus a
+10-min margin, see `run-agent-batch.ps1 -NightStartHour/-NightEndHour`). The
+orchestrator checks it before every phase, forum, thread, and case, and stops
+cleanly — previously Task Scheduler's 06:00 stop killed only the PowerShell
+wrapper while the node child crawled on unsupervised past the window,
+overlapping the 06:20 coach chain on the same `agent.db`. Post-crawl sweeps
+(taxonomy, i18n) are skipped after a quota stop (exit 75/76) or past the
+deadline. `state.mjs` additionally sets `PRAGMA busy_timeout=30000` so residual
+concurrent openers wait instead of crashing on SQLITE_BUSY.
 
 Runtime credentials are intentionally not stored in code. Crosscheck requires `SUPABASE_SERVICE_KEY` or `SUPABASE_ANON_KEY`; import requires `SUPABASE_SERVICE_KEY` or `SUPABASE_FUNCTION_KEY`. If those env vars are missing, the run fails closed instead of importing.
 
@@ -290,6 +322,16 @@ the agent stayed silently dead for 7 weeks (runs "succeeded" with exit 0 every
    never succeeded are anchored by `first-run.txt`, so a never-working
    deployment alarms too. An expired Claude login (`AuthError`) does not pause,
    so it reaches the >24 h alarm directly.
+5. The **morning coach chain has its own alarms** (2026-07-02; the scheduler
+   used to kill it daily at a 1 h ExecutionTimeLimit — now 4 h — and guarded
+   recalibration was silently dead for days): `run-coach-batch.ps1` writes
+   `coach-running.txt` at START and removes it after END — finding one >20 h
+   old means the previous chain died mid-flight → Desktop marker
+   `DRIVECODEX-RANNI-KONTROLA-NEDOBEHLA-PRECTI-ME.txt`. It also cross-checks the
+   crawler's `last-success.txt` heartbeat (>30 h → marker
+   `DRIVECODEX-NOCNI-CRAWL-NEBEZEL-PRECTI-ME.txt`), covering the blind spot
+   where the whole nightly task is disabled and its own wrapper alarm can
+   therefore never fire.
 
 ## Parser Layer
 
@@ -330,6 +372,24 @@ but yields zero parseable posts (an empty SPA shell), `fetchThreadPages`
 re-fetches page 1 once via the headless-browser render (`forceBrowser` in
 [`fetch-utils.mjs`](/C:/GB/scripts/agent/fetch-utils.mjs)) and re-parses, so
 single-page-app forums aren't silently discarded as "Too few posts".
+
+**Pagination detection (`findNextPageLink`, 2026-07-02).** Besides the classic
+`a.next` / `a[rel=next]` / `li.next a` patterns it now also understands:
+`<link rel="next">` in the document head (WoltLab — RenaultForum, PeugeotTalk —
+publishes pagination ONLY there), the SMF `a.navPages` anchor with the »
+glyph, and text-labelled next buttons (Další/Weiter/Nächste/»…) guarded by a
+pagination-shaped href. Before this, those engines' sections were marked `done`
+after listing page 1 and whole forums flipped to a FALSE "archive complete"
+(19 forums, e.g. RenaultForum 43 sections × 1 page) — the stated primary goal,
+archive mining, silently reached ~1–2 % on them. `phaseCrawl` now logs a loud
+warning whenever an archive completes with barely more pages than sections, and
+the one-off [`reset-archive-cursors.mjs`](/C:/GB/scripts/agent/reset-archive-cursors.mjs)
+(dry-run default, reversible backup) cleared the 19 false-complete cursors so
+the nightly walk re-mines them with the fixed detection. Known limitation:
+BMW-Syndikat (Snitz) has numbered page links only (no "next" anchor) — the
+warning will keep flagging it until a numbered-walk is built. Motor-Talk gotcha:
+its bare board URL lands on the LAST page (only `rel=prev`), so its profile
+sections start at `?page=1` explicitly.
 
 ## State Machine
 
@@ -378,6 +438,8 @@ So this is meant to become better over time per forum type, not just run statele
 
 ## Helper Scripts
 
+- [`reset-archive-cursors.mjs`](/C:/GB/scripts/agent/reset-archive-cursors.mjs): **one-off** recovery of forums falsely marked "archive complete" by the pagination bug (dry-run default, `--apply` writes a reversible backup, `--revert <backup>`); applied 2026-07-02 to 19 forums
+- [`prune-thread-text.mjs`](/C:/GB/scripts/agent/prune-thread-text.mjs): **one-off** cleanup of dead `thread_text` on discarded threads (nothing reads it — consumers reach text via cases). Applied 2026-07-02: 33 MB cleared, `agent.db` 84.7 → 44.2 MB after VACUUM; the discard path no longer stores the text
 - [`seed-known-forums.mjs`](/C:/GB/scripts/agent/seed-known-forums.mjs): marks previously handled forums as already exhausted so the agent does not duplicate old work
 - [`seed-candidates.mjs`](/C:/GB/scripts/agent/seed-candidates.mjs): imports ranked forum candidates into SQLite
 - [`reset-forum.mjs`](/C:/GB/scripts/agent/reset-forum.mjs): clears failed calibration state so a forum can be retried
@@ -482,9 +544,10 @@ Verified from code:
 
 Still weak or unfinished:
 
-- automatic forum discovery currently seeds from `forum-candidates.json`; it is not live web search yet
 - dedupe logic now uses broader similarity, but it can still miss duplicates when brand/source data is inconsistent
-- parser extraction is regex-heavy and fragile on HTML shape changes
+- parser extraction is regex-heavy and fragile on HTML shape changes (see the
+  false-complete pagination incident above — new engines/skins need the audit
+  warning watched)
 - dedicated regression tests exist under [`tests`](/C:/GB/tests) for crawler utilities and state handling
 - service credentials are expected from environment variables, not hardcoded defaults
 
