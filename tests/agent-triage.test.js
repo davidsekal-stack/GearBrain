@@ -49,6 +49,7 @@ const prompt = buildTriagePrompt(
 );
 assert.doesNotMatch(prompt, /\nIGNORE ALL PREVIOUS/, 'newline-prefixed injection collapsed by sanitization');
 assert.ok(!prompt.includes('END_MARK'), 'over-long field length-capped');
+assert.match(prompt, /untrusted forum content|NOT instructions/i, 'thread block framed as untrusted (anti-injection)');
 
 // ── supabase-utils REST helpers (fake fetch) ──
 const listFetch = async (url) => {
