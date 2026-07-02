@@ -675,7 +675,8 @@ async function phaseVerify(state, opts) {
   console.log('\n── Phase: VERIFY ──');
 
   let passed = 0;
-  let failed = 0;
+  let rejected = 0;   // gate FAILs only (quality signal for verify_pass_rate)
+  let errored = 0;    // transient errors — NOT a quality rejection
   let drained = false;
 
   // Drain the whole queue batch-by-batch (was: ONE batch per run). Verify
@@ -714,13 +715,13 @@ async function phaseVerify(state, opts) {
           console.log(`  ✓ ${c.id}`);
         } else {
           state.updateCase(c.id, { status: 'verify_rejected', review_note: `Verifier: ${result.reason}` });
-          failed++;
+          rejected++;
           console.log(`  ✗ ${c.id}: ${result.reason}`);
         }
       } catch (err) {
         if (isStoppingError(err)) throw err;  // quota/auth → stop the phase
         state.updateCase(c.id, { status: 'verify_error', review_note: `Error: ${err.message}` });
-        failed++;
+        errored++;
         console.error(`  ✗ ${c.id}: error — ${err.message}`);
       }
 
@@ -732,8 +733,12 @@ async function phaseVerify(state, opts) {
     console.log('  No cases pending verification.');
     return {};
   }
-  console.log(`  Verification done: ${passed} passed, ${failed} failed.`);
-  return { cases_verified: passed };
+  console.log(`  Verification done: ${passed} passed, ${rejected} rejected, ${errored} errored.`);
+  // cases_verify_rejected feeds the night report's true verify_pass_rate — the
+  // report sums per-run throughput (what happened tonight) instead of the
+  // created-that-night case cohort (which lags verify by 1–2 nights). Errors are
+  // excluded: a transient failure is not a quality rejection.
+  return { cases_verified: passed, cases_verify_rejected: rejected };
 }
 
 // ---------------------------------------------------------------------------
@@ -967,6 +972,7 @@ function createEmptyRunStats() {
     threads_processed: 0,
     cases_extracted: 0,
     cases_verified: 0,
+    cases_verify_rejected: 0,
     cases_imported: 0,
   };
 }

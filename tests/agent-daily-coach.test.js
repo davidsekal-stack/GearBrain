@@ -19,7 +19,10 @@ assert.equal(bucketDiscardReason('transient: HTTP 429'), 'transient');
 assert.equal(bucketDiscardReason('something else'), 'other');
 assert.equal(bucketDiscardReason(null), 'other');
 
-// ── aggregateNight (cohort-based: threads + cases created in window) ─────────
+// ── aggregateNight ───────────────────────────────────────────────────────────
+// Extraction/discards/per-forum come from the created-tonight cohort; verify &
+// import THROUGHPUT come from the runs table (what actually happened tonight),
+// so a verify that lags extraction by a night is still counted correctly.
 const agg = aggregateNight({
   threads: [
     { id: 't1', forum_id: 'f1', status: 'discarded', discard_reason: 'Too few posts' },
@@ -32,6 +35,13 @@ const agg = aggregateNight({
     { id: 'c2', thread_id: 't3', forum_id: 'f2', status: 'verify_rejected', review_note: 'Verifier: failed:is_genuine_fault — x' },
     { id: 'c3', thread_id: 'tX', forum_id: 'f3', status: 'imported', review_note: null }, // thread outside window, but forum_id joined
   ],
+  // Runs this window: 5 passed verify, 2 rejected, 4 imported — deliberately
+  // DIFFERENT from the case-cohort statuses to prove the throughput is sourced
+  // from runs (the created-tonight cohort would give 2 verified / 1 imported).
+  runs: [
+    { cases_verified: 3, cases_verify_rejected: 1, cases_imported: 2, stop_reason: null },
+    { cases_verified: 2, cases_verify_rejected: 1, cases_imported: 2, stop_reason: null },
+  ],
   forums: [{ id: 'f1', name: 'Forum One' }, { id: 'f2', name: 'Forum Two' }, { id: 'f3', name: 'Forum Three' }],
 });
 
@@ -40,12 +50,24 @@ assert.equal(agg.metrics.threads_discarded, 2);
 assert.equal(agg.metrics['discarded:too_few_posts'], 1);
 assert.equal(agg.metrics['discarded:classifier_reject'], 1);
 assert.equal(agg.metrics.cases_extracted, 3);
-assert.equal(agg.metrics.cases_verified, 2, 'verified + imported both passed verify');
-assert.equal(agg.metrics.cases_imported, 1);
-assert.equal(agg.metrics.verify_rejected, 1);
-assert.equal(agg.metrics['verify_reject:is_genuine_fault'], 1);
-assert.equal(agg.metrics.verify_pass_rate, +(2 / 3).toFixed(3), 'one cohort: passed/(passed+rejected)');
-assert.equal(agg.metrics.import_rate, +(1 / 3).toFixed(3));
+assert.equal(agg.metrics.cases_verified, 5, 'verify throughput summed from runs, not the lagging cohort');
+assert.equal(agg.metrics.cases_imported, 4, 'import throughput summed from runs');
+assert.equal(agg.metrics.verify_rejected, 2, 'rejections summed from runs');
+assert.equal(agg.metrics['verify_reject:is_genuine_fault'], 1, 'reject-reason histogram stays cohort-based (diagnostic)');
+assert.equal(agg.metrics.verify_pass_rate, +(5 / 7).toFixed(3), 'runs cohort: passed/(passed+rejected)');
+assert.equal(agg.metrics.import_rate, +(4 / 5).toFixed(3), 'imported/verified, same runs cohort');
+
+// Without `runs`, it falls back to the cohort (standalone usability preserved).
+const cohortOnly = aggregateNight({
+  threads: [{ id: 't3', forum_id: 'f2', status: 'extracted' }],
+  cases: [
+    { id: 'c1', forum_id: 'f2', status: 'verified' },
+    { id: 'c3', forum_id: 'f3', status: 'imported' },
+  ],
+  forums: [{ id: 'f2' }, { id: 'f3' }],
+});
+assert.equal(cohortOnly.metrics.cases_verified, 2, 'no runs → cohort fallback (verified+imported passed verify)');
+assert.equal(cohortOnly.metrics.cases_imported, 1, 'no runs → cohort fallback');
 // byForum now spans the UNION of forums seen in threads OR cases (dense series),
 // with per-forum processed/extracted/transient/too_few. f1 has threads but no cases
 // (busy-but-barren → explicit zeros); c3 counts in f2/f3 via joined forum_id.

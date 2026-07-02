@@ -254,6 +254,9 @@ export class AgentState {
       // + the case id, so the revert path can restore a case status, not a forum.
       "ALTER TABLE coach_journal ADD COLUMN target_kind TEXT DEFAULT 'forum'",
       'ALTER TABLE coach_journal ADD COLUMN case_id TEXT',
+      // Per-run verify rejections — lets the night report compute the true
+      // verify_pass_rate from run throughput, not the lagging created-tonight cohort.
+      'ALTER TABLE runs ADD COLUMN cases_verify_rejected INTEGER DEFAULT 0',
     ];
     for (const sql of alterations) {
       try { this.#db.exec(sql); } catch { /* column already exists */ }
@@ -667,6 +670,7 @@ export class AgentState {
          threads_processed = ?,
          cases_extracted = ?,
          cases_verified = ?,
+         cases_verify_rejected = ?,
          cases_imported = ?,
          stop_reason = ?
        WHERE id = ?`
@@ -675,6 +679,7 @@ export class AgentState {
       stats.threads_processed ?? 0,
       stats.cases_extracted ?? 0,
       stats.cases_verified ?? 0,
+      stats.cases_verify_rejected ?? 0,
       stats.cases_imported ?? 0,
       stopReason,
       runId,
