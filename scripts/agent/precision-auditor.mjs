@@ -65,6 +65,16 @@ const MIN_JUDGED = intEnv('PRECISION_MIN_JUDGED', 4);
 const POOL_WINDOW_DAYS = intEnv('PRECISION_POOL_DAYS', 7);
 const POOL_ALERT_MIN   = intEnv('PRECISION_POOL_MIN', 3);
 const CLUSTER_MIN      = intEnv('PRECISION_CLUSTER_MIN', 2);
+// Trend-aware pooled alarm (review 2026-07-02, point 5). The old pooled gate
+// (ratio >= 15 %) fired EVERY day at the current ~40 % base rate and could never
+// go quiet even as things improved — alarm fatigue. Now the pooled marker fires
+// only when the 7-day rate is SEVERE in absolute terms, OR REGRESSES clearly
+// above its own trailing baseline. A high-but-stable-or-improving rate lets the
+// marker clear (the flagged-cases tool + gold session are the deliberate
+// response), while a genuine relapse re-fires.
+const SEVERE_RATE       = floatEnv('PRECISION_SEVERE_RATE', 0.30);
+const REGRESSION_FACTOR = floatEnv('PRECISION_REGRESSION_FACTOR', 1.5);
+const POOL_BASELINE_DAYS = intEnv('PRECISION_BASELINE_DAYS', 30);
 const COVERAGE_CAP     = intEnv('PRECISION_COVERAGE_CAP', 500);
 const RESOLUTION_SHORT_CHARS = intEnv('PRECISION_RES_SHORT', 220);
 const AUDIT_TIMEOUT_MS = 90_000;
@@ -207,12 +217,21 @@ function shuffle(arr, rng) {
  * Decide whether to raise the Desktop marker. alert = pooledHit OR clusterHit.
  *  - clusterHit: today wrong>=min, judged>=minJudged, ratio>=rate, AND the flags cluster
  *    on one quality-bar clause (>=clusterMin) — the systematic-leak fingerprint.
- *  - pooledHit: trailing multi-day wrong>=poolMin AND pooled ratio>=rate.
+ *  - pooledHit = severeHit OR regressionHit (trend-aware, so it can go quiet):
+ *      severeHit: pooled wrong>=poolMin AND pooled ratio >= severeRate (absolute ceiling).
+ *      regressionHit: pooled wrong>=poolMin AND pooled ratio>=rate AND pooled ratio
+ *        >= regressionFactor × baseline ratio (the 30-day trailing rate) — a clear
+ *        relapse above the forum's own norm.
+ *  A high-but-stable/improving rate below severeRate and not regressing → NO pooled
+ *  alarm, so the marker clears once the situation is understood and being worked.
  *  A per-day wrong>=min without cluster/pool is only a quieter report nudge.
  *  parseFail/errored rows are excluded from every denominator (can't manufacture an alarm).
  */
 export function shouldAlertPrecision(todayResults, pooledStats = { wrong: 0, judged: 0 }, opts = {}) {
-  const { rate = ALERT_RATE, min = ALERT_MIN, minJudged = MIN_JUDGED, poolMin = POOL_ALERT_MIN, clusterMin = CLUSTER_MIN } = opts;
+  const {
+    rate = ALERT_RATE, min = ALERT_MIN, minJudged = MIN_JUDGED, poolMin = POOL_ALERT_MIN, clusterMin = CLUSTER_MIN,
+    severeRate = SEVERE_RATE, regressionFactor = REGRESSION_FACTOR, baseline = null,
+  } = opts;
   const judgedRows = (todayResults || []).filter(r => !r.parseFail && !r.errored);
   const wrongRows = judgedRows.filter(r => r.wronglyAccepted);
   const judged = judgedRows.length, wrong = wrongRows.length;
@@ -232,12 +251,17 @@ export function shouldAlertPrecision(todayResults, pooledStats = { wrong: 0, jud
   const pooledWrong = pooledStats.wrong || 0;
   const pooledJudged = pooledStats.judged || 0;
   const pooledRatio = pooledJudged ? pooledWrong / pooledJudged : 0;
-  const pooledHit = pooledWrong >= poolMin && pooledRatio >= rate;
+  const baselineRatio = baseline && baseline.judged ? baseline.wrong / baseline.judged : 0;
+
+  const severeHit = pooledWrong >= poolMin && pooledRatio >= severeRate;
+  const regressionHit = pooledWrong >= poolMin && pooledRatio >= rate
+    && baselineRatio > 0 && pooledRatio >= regressionFactor * baselineRatio;
+  const pooledHit = severeHit || regressionHit;
 
   return {
-    alert: pooledHit || clusterHit, clusterHit, pooledHit, perDayNudge,
+    alert: pooledHit || clusterHit, clusterHit, pooledHit, severeHit, regressionHit, perDayNudge,
     wrong, judged, ratio, clusterClause, clusterCount,
-    pooledWrong, pooledJudged, pooledRatio,
+    pooledWrong, pooledJudged, pooledRatio, baselineRatio,
     highConf: wrongRows.filter(r => r.confidence === 'high').length,
   };
 }
@@ -433,10 +457,12 @@ async function main() {
       }));
       appendFileSync(LABELS_FILE, lines.join('\n') + '\n', 'utf8');
     }
-    const pooled = pooledStatsFrom(readLabelLines(LABELS_FILE), today, POOL_WINDOW_DAYS);
-    const decision = shouldAlertPrecision(results, pooled);
+    const labelLines = readLabelLines(LABELS_FILE);
+    const pooled = pooledStatsFrom(labelLines, today, POOL_WINDOW_DAYS);
+    const baseline = pooledStatsFrom(labelLines, today, POOL_BASELINE_DAYS);
+    const decision = shouldAlertPrecision(results, pooled, { baseline });
 
-    console.log(`precision-auditor: judged ${decision.judged}, wrongly-accepted ${decision.wrong} (${(decision.ratio * 100).toFixed(0)}%), pooled ${decision.pooledWrong}/${decision.pooledJudged}, unparsed ${unparsed} → alert=${decision.alert}`);
+    console.log(`precision-auditor: judged ${decision.judged}, wrongly-accepted ${decision.wrong} (${(decision.ratio * 100).toFixed(0)}%), pooled ${decision.pooledWrong}/${decision.pooledJudged} (${(decision.pooledRatio * 100).toFixed(0)}%), baseline ${(decision.baselineRatio * 100).toFixed(0)}% over ${POOL_BASELINE_DAYS}d, unparsed ${unparsed} → alert=${decision.alert}${decision.alert ? ` [${decision.severeHit ? 'severe' : ''}${decision.regressionHit ? 'regression' : ''}${decision.clusterHit ? 'cluster' : ''}]` : ''}`);
 
     if (dryRun) {
       console.log('precision-auditor: dry-run — nothing written (no report/metrics/labels/day-stamp).');
@@ -447,8 +473,12 @@ async function main() {
 
     // Desktop marker (mirrored by run-coach-batch.ps1).
     if (decision.alert) {
+      const why = decision.regressionHit && !decision.severeHit
+        ? ` [zhoršení proti ${POOL_BASELINE_DAYS}d průměru ${(decision.baselineRatio * 100).toFixed(0)} %]`
+        : decision.severeHit ? ' [vysoká míra]' : '';
       const msg = `Precizní auditor: z ${decision.judged} překontrolovaných schválených případů jich nezávislá kontrola označila ${decision.wrong} jako pravděpodobně chybně schválené`
         + (decision.pooledJudged ? ` (za ${POOL_WINDOW_DAYS} dní ${decision.pooledWrong}/${decision.pooledJudged})` : '')
+        + why
         + (decision.clusterCount >= CLUSTER_MIN ? `; většina padá na podmínku ${decision.clusterClause}` : '')
         + `. Report: logs/precision-audit-${today}.md`;
       writeFileSync(ALERT_FILE, msg, 'utf8');
