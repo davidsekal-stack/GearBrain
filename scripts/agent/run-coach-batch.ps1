@@ -256,6 +256,11 @@ if ($script:StoppingHit) {
   Invoke-NodeStep -NodeExe $nodeExe -Script (Join-Path $agentDir 'triage.mjs') -LogPath $logPath -RepoRoot $repoRoot -Label 'intake triage'
 }
 
+# Un-rot calibration_failed forums (self-gates to once/~month, no LLM: applies
+# now-matching profiles directly + re-arms a bounded few for nightly retry).
+# Runs regardless of a quota stop — it makes no LLM/network calls itself.
+Invoke-NodeStep -NodeExe $nodeExe -Script (Join-Path $agentDir 'retry-failed-calibrations.mjs') -LogPath $logPath -RepoRoot $repoRoot -Label 'retry failed calibrations'
+
 # Guarded auto-recalibration runs LAST (it is the most LLM-expensive step: forum
 # re-discovery + probes). Skip it if an earlier step already hit a quota/auth stop,
 # so we never half-run re-discovery on a depleted quota.
