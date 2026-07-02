@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { isClassifierApproved } from '../scripts/agent/classify.mjs';
 
-// This test LOCKS the classifier gate's quality floor. Owner policy (2026-06):
-// the repair may be carried out/confirmed by ANOTHER user (helper/mechanic) as
-// long as (a) the fault is the car owner's and (b) the fix is CONFIRMED to have
-// worked. So same_user_confirms_resolution is NO LONGER gated on — but
+// This test LOCKS the classifier gate's quality floor. Owner policy (2026-06,
+// tightened 2026-07-02 after the precision audit): the repair may be carried
+// out by ANOTHER user (helper/mechanic), but the OUTCOME CONFIRMATION must come
+// from the owner (the same user who reported the fault) — that requirement now
+// lives inside the has_confirmed_resolution DEFINITION in the prompt. So
+// same_user_confirms_resolution is NOT gated on separately — but
 // has_confirmed_resolution (a confirmed successful repair exists) IS still
 // required, in lockstep with the extractor + validate (fault-anchor) + verify gates.
 // If a future edit re-adds same_user_confirms_resolution to the gate, or drops

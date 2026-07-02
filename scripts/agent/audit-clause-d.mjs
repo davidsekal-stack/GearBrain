@@ -51,7 +51,7 @@ function buildPrompt(threadText, c) {
   const text = (threadText || '').length > MAX_THREAD_CHARS ? threadText.slice(0, MAX_THREAD_CHARS) + '\n[...]' : (threadText || '');
   return `A repair case was extracted from the forum thread below and is awaiting approval. It was held back because an automated judge could not confirm the repair actually FIXED the fault. Re-check ONLY that question against the thread.
 
-The case is CONFIRMED only if the thread contains a clear statement — by the car's OWNER or a later reply about the same car — that AFTER this repair the original fault was GONE / the car worked / the problem was solved. A plan to try it, "I'll report back", ordering a part, or an ambiguous outcome is NOT a confirmation.
+The case is CONFIRMED only if the thread contains a clear statement — by the car's OWNER (the SAME user who reported the fault) — that AFTER this repair the original fault was GONE / the car worked / the problem was solved. A plan to try it, "I'll report back", ordering a part, or an ambiguous outcome is NOT a confirmation.
 
 CASE:
   Vehicle: ${promptField(c.vehicle_brand || '?', 80)} ${promptField(c.vehicle_model || '', 80)}
