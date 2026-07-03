@@ -33,7 +33,8 @@ import { writeDiary } from './diary.mjs';
 import { discoverCandidates } from './discover.mjs';
 import { upsertForum } from './forum-registry.mjs';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { QuotaError, AuthError, isStoppingError, formatQuotaMessage } from './quota.mjs';
 import {
   computePauseUntil,
@@ -68,6 +69,19 @@ const LOCAL_DUPLICATE_STATUSES = new Set(['verified', 'import_ready', 'imported'
 // NOT pause (a human must re-login) — they set a stop reason so the heartbeat
 // is skipped and the wrapper's stall alarm reaches the owner.
 const AUTH_EXIT_CODE = 76;
+
+// ── Night-window deadline ──
+// The nightly wrapper (run-agent-batch.ps1) passes AGENT_DEADLINE_EPOCH_MS =
+// window end (06:00) minus a safety margin. Task Scheduler's StopAtDurationEnd
+// kills only the PowerShell wrapper — the node child survived it and kept
+// crawling unsupervised past 06:00, overlapping the 06:20 coach chain on the
+// same agent.db (SQLITE_BUSY risk; 17 dangling runs rows). Past the deadline
+// the orchestrator stops STARTING new work and exits cleanly. No env var → no
+// deadline (manual daytime runs are unaffected).
+const RUN_DEADLINE_MS = Number(process.env.AGENT_DEADLINE_EPOCH_MS) || null;
+function pastDeadline() {
+  return RUN_DEADLINE_MS !== null && Date.now() >= RUN_DEADLINE_MS;
+}
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -372,9 +386,26 @@ async function phaseCalibrate(state, opts) {
 const COOLDOWN_HOURS_SHORT = 24;       // transient enumeration error → retry tomorrow
 const COOLDOWN_HOURS_EXHAUSTED = 720;  // archive fully mined → rest 30 days
 
+// Forum-level circuit breaker: a permanently-blocked forum (e.g. a WAF 406 on
+// every page) used to make ZERO progress yet stay `active` with no cooldown, so
+// every 5-min batch re-ran the full fetch → system-Chrome dump → Crawlee browser
+// launch on the same dead forum, all night, forever. After this many consecutive
+// no-progress-with-errors batches, park it for a day and alarm, instead of
+// burning a browser launch every batch.
+const FORUM_FAILURE_LIMIT = Number(process.env.AGENT_FORUM_FAIL_LIMIT) || 3;
+const COOLDOWN_HOURS_BLOCKED = Number(process.env.AGENT_FORUM_BLOCK_COOLDOWN_H) || 24;
+
 // Archive walk pacing.
 const ARCHIVE_PAGES_PER_BATCH = 2;     // listing pages to advance per forum per batch
 const HEAD_SCAN_PAGES = 2;             // shallow head re-scan for new threads once complete
+
+/**
+ * Circuit-breaker streak: a batch that made NO progress AND hit a fetch failure
+ * bumps the streak; any progress resets it to 0. Pure (exported for tests).
+ */
+export function computeFailureStreak(prev, madeProgress, hadFailure) {
+  return (!madeProgress && hadFailure) ? (Number(prev) || 0) + 1 : 0;
+}
 
 async function phaseCrawl(state, opts) {
   console.log('\n── Phase: CRAWL ──');
@@ -396,6 +427,10 @@ async function phaseCrawl(state, opts) {
   let totalCases = 0;
 
   for (const forum of ready) {
+    if (pastDeadline()) {
+      console.log('  ⏱ Window deadline reached — stopping crawl cleanly (remaining forums next run).');
+      break;
+    }
     console.log(`  Crawling: ${forum.name || forum.url}`);
     const calibration = safeJsonParse(forum.calibration_json);
 
@@ -414,10 +449,12 @@ async function phaseCrawl(state, opts) {
     // low, so the pending queue stays bounded.
     let cursor = safeJsonParse(forum.archive_cursor_json);
     if (!cursor || !cursor.sections) cursor = { sections: {}, complete: false };
+    const wasComplete = !!cursor.complete;
     const queueFloor = Math.max(opts.batchSize * 2, 20);
     let pendingCount = state.countPendingThreads(forum.id);
 
     let walk = null;
+    let walkFailed = false;   // an attempted archive/head walk threw (fetch blocked)
     try {
       if (!cursor.complete && pendingCount < queueFloor) {
         // Archive not fully mined yet → fetch the next pages and enqueue them.
@@ -428,6 +465,24 @@ async function phaseCrawl(state, opts) {
         });
         cursor = walk.cursor;
         state.updateForum(forum.id, { archive_cursor_json: JSON.stringify(cursor) });
+
+        // ── False-complete audit ──
+        // A section is "done" the moment findNextPageLink returns null, so an
+        // undetected pagination pattern silently declares a whole forum's
+        // archive mined after ~1 page per section (seen on WoltLab/SMF:
+        // RenaultForum 43 sections × 1 page). Completing with barely more
+        // pages than sections is that signature — warn loudly instead of
+        // parking the forum for 30 days in silence.
+        if (cursor.complete && !wasComplete) {
+          const secCount = Object.keys(cursor.sections || {}).length;
+          const totalPages = Object.values(cursor.sections || {})
+            .reduce((a, s) => a + (s?.pages || 0), 0);
+          if (secCount > 0 && totalPages <= secCount + 2) {
+            const msg = `archive marked complete after only ${totalPages} listing page(s) across ${secCount} section(s) — pagination likely undetected (false complete); check section_pagination_selector / findNextPageLink for this engine`;
+            console.warn(`  ⚠ ${forum.url}: ${msg}`);
+            state.log('warn', `${forum.url}: ${msg}`, 'crawl');
+          }
+        }
       } else if (cursor.complete && pendingCount === 0) {
         // Archive done → shallow head-scan for brand-new threads (the cherry).
         walk = await enumerateThreadUrlsDeep(forum, calibration, {
@@ -439,6 +494,7 @@ async function phaseCrawl(state, opts) {
       }
     } catch (err) {
       if (isStoppingError(err)) throw err;
+      walkFailed = true;
       console.error(`  Error walking archive for ${forum.url}: ${err.message}`);
     }
 
@@ -463,7 +519,13 @@ async function phaseCrawl(state, opts) {
     const processedUrls = [];
     let batchCases = 0;
     let deferredCount = 0;
+    let threadOk = 0;      // threads that reached a real verdict (extracted/discarded/deferred)
+    let threadErrors = 0;  // threads that errored (fetch/parse) this batch
     for (const t of queue) {
+      if (pastDeadline()) {
+        console.log('  ⏱ Window deadline reached — leaving remaining queued threads pending.');
+        break;
+      }
       const threadId = t.id;
       const url = t.url;
       processedUrls.push(url);
@@ -483,19 +545,27 @@ async function phaseCrawl(state, opts) {
             title: result.title || null,
           });
           deferredCount++;
+          threadOk++;
           continue;
         }
 
         if (result.skipped) {
+          // No thread_text on discards (mirrors the deferred path): nothing
+          // ever reads it again — every consumer (verify, triage, audits)
+          // reaches thread_text via cases, and discarded threads have none.
+          // Storing it grew agent.db by ~5 MB/night (33 MB of dead text by
+          // 2026-07). A later re-judge (recover/revive) re-fetches anyway.
           state.updateThread(threadId, {
             status: 'discarded',
             discard_reason: result.skipped,
-            thread_text: result.threadText || null,
+            thread_text: null,
             title: result.title || null,
           });
+          threadOk++;
           continue;
         }
 
+        threadOk++;
         state.updateThread(threadId, {
           status: 'extracted',
           thread_text: result.threadText,
@@ -530,6 +600,7 @@ async function phaseCrawl(state, opts) {
         }
       } catch (err) {
         if (isStoppingError(err)) throw err;  // quota/auth → stop the phase, don't bury the thread
+        threadErrors++;
         console.error(`  Error processing ${url}: ${err.message}`);
         // First transient failure (timeout, 5xx, connection reset) → leave the
         // thread pending so the next batch retries it once; repeated or
@@ -561,12 +632,35 @@ async function phaseCrawl(state, opts) {
       new_threads_last_batch: enqueued,
       cases_total: forumCases,
     };
+    // Circuit breaker: a batch that made NO progress AND hit fetch errors (walk
+    // blocked and/or every thread errored) is a blocked-forum signature. Count
+    // consecutive such batches; on any progress, reset. Enqueuing new threads or
+    // reaching any real verdict counts as progress (an empty but successful
+    // head-scan is NOT a failure — no walkFailed, no threadErrors).
+    const madeProgress = batchCases > 0 || threadOk > 0 || enqueued > 0;
+    const hadFailure = walkFailed || threadErrors > 0;
+    const failStreak = computeFailureStreak(forum.consecutive_failures, madeProgress, hadFailure);
+    forumUpdate.consecutive_failures = failStreak;
+
     if (archiveDone) {
       forumUpdate.status = 'exhausted';
       forumUpdate.cooldown_until = new Date(Date.now() + COOLDOWN_HOURS_EXHAUSTED * 3600_000).toISOString();
       forumUpdate.cooldown_tier_hours = COOLDOWN_HOURS_EXHAUSTED;
       forumUpdate.cooldown_set_at = crawledAt;
       console.log(`  ✓ Archive fully mined — resting ${forum.name || forum.url} for 30 days.`);
+    } else if (failStreak >= FORUM_FAILURE_LIMIT) {
+      // Blocked/dead forum → park for a day and alarm, instead of re-launching a
+      // full browser fetch on it every 5-min batch all night. Reset the streak so
+      // it gets a fresh chance after the cooldown; if it fails again it re-trips
+      // (→ effectively one retry per COOLDOWN_HOURS_BLOCKED, not per batch).
+      forumUpdate.status = 'active';
+      forumUpdate.cooldown_until = new Date(Date.now() + COOLDOWN_HOURS_BLOCKED * 3600_000).toISOString();
+      forumUpdate.cooldown_tier_hours = COOLDOWN_HOURS_BLOCKED;
+      forumUpdate.cooldown_set_at = crawledAt;
+      forumUpdate.consecutive_failures = 0;
+      const msg = `${forum.url}: ${FORUM_FAILURE_LIMIT} consecutive no-progress batches (fetch blocked?) — parking ${COOLDOWN_HOURS_BLOCKED}h instead of retrying every batch`;
+      console.warn(`  ⚠ ${msg}`);
+      state.log('warn', msg, 'crawl');
     } else {
       // Stay eligible: no long park while there is archive left to walk or a
       // backlog to drain.
@@ -593,25 +687,32 @@ async function phaseCrawl(state, opts) {
       last_crawled_at: crawledAt,
     }, { now: crawledAt }).catch(() => {});
 
-    // ── Write LLM diary entry for this forum ──
-    // Collect top discard reasons from the threads processed this batch.
-    const discardReasons = [];
-    for (const url of processedUrls) {
-      const t = state.getThreadByUrl(url);
-      if (t?.discard_reason) discardReasons.push(t.discard_reason);
-    }
-    const discardCounts = {};
-    for (const r of discardReasons) discardCounts[r] = (discardCounts[r] ?? 0) + 1;
-    const topDiscards = Object.entries(discardCounts)
-      .sort((a, b) => b[1] - a[1]).slice(0, 5).map(([r, n]) => `${r} (×${n})`);
+    // ── Write LLM diary entry for this forum (throttled to once/forum/day) ──
+    // Was ~1 Haiku call per forum per 5-min batch (~60/night); its only consumer
+    // is the calibration prompt for NEW forums, so the write:read ratio was ~400:1.
+    // Keep the diary (the learning loop needs it), just stop rewriting it all night.
+    const todayUtc = new Date().toISOString().slice(0, 10);
+    if ((forum.diary_written_at || '').slice(0, 10) !== todayUtc) {
+      // Collect top discard reasons from the threads processed this batch.
+      const discardReasons = [];
+      for (const url of processedUrls) {
+        const t = state.getThreadByUrl(url);
+        if (t?.discard_reason) discardReasons.push(t.discard_reason);
+      }
+      const discardCounts = {};
+      for (const r of discardReasons) discardCounts[r] = (discardCounts[r] ?? 0) + 1;
+      const topDiscards = Object.entries(discardCounts)
+        .sort((a, b) => b[1] - a[1]).slice(0, 5).map(([r, n]) => `${r} (×${n})`);
 
-    try {
-      // Exclude deferred (too-young, set aside — no verdict) from the diary's
-      // yield denominator, mirroring countCrawledThreads / the coach counters.
-      await writeDiary(state, forum, { threads: processedUrls.length - deferredCount, cases: batchCases }, topDiscards);
-    } catch (err) {
-      if (isStoppingError(err)) throw err;
-      logWarn(`Diary write skipped for ${forum.name || forum.url}: ${err.message}`);
+      try {
+        // Exclude deferred (too-young, set aside — no verdict) from the diary's
+        // yield denominator, mirroring countCrawledThreads / the coach counters.
+        await writeDiary(state, forum, { threads: processedUrls.length - deferredCount, cases: batchCases }, topDiscards);
+        state.updateForum(forum.id, { diary_written_at: new Date().toISOString() });
+      } catch (err) {
+        if (isStoppingError(err)) throw err;
+        logWarn(`Diary write skipped for ${forum.name || forum.url}: ${err.message}`);
+      }
     }
   }
 
@@ -629,54 +730,71 @@ async function phaseCrawl(state, opts) {
 async function phaseVerify(state, opts) {
   console.log('\n── Phase: VERIFY ──');
 
-  const cases = state.getCasesForVerification(opts.batchSize, VERIFY_RETRY_LIMIT);
-  if (cases.length === 0) {
+  let passed = 0;
+  let rejected = 0;   // gate FAILs only (quality signal for verify_pass_rate)
+  let errored = 0;    // transient errors — NOT a quality rejection
+  let drained = false;
+
+  // Drain the whole queue batch-by-batch (was: ONE batch per run). Verify
+  // throughput was capped at batchSize/run ≈ 120/night while extraction makes
+  // ~140/night — the ai_approved backlog grew without bound (260 cases by
+  // 2026-07-02) and the night report said "verified: 0" for cases that passed
+  // 1–2 nights later. Termination: every processed case changes status or
+  // bumps its attempts past the retry limit, so the selection always shrinks.
+  while (!pastDeadline()) {
+    const cases = state.getCasesForVerification(opts.batchSize, VERIFY_RETRY_LIMIT);
+    if (cases.length === 0) break;
+    drained = true;
+    console.log(`  Verifying ${cases.length} case(s) with the independent AI auditor...`);
+
+    for (const c of cases) {
+      if (pastDeadline()) break;
+      const payload = JSON.parse(c.payload_json);
+      state.updateCase(c.id, { verify_attempts: (c.verify_attempts ?? 0) + 1 });
+
+      // Get original thread text
+      const thread = state.getThread(c.thread_id);
+      if (!thread?.thread_text) {
+        console.log(`  ⊘ ${c.id}: no thread text available, skipping`);
+        state.updateCase(c.id, { status: 'verify_skipped', review_note: 'No thread text' });
+        continue;
+      }
+
+      try {
+        const result = await verifyCase(thread.thread_text, payload, {
+          timeoutMs: opts.verifyTimeoutMs || 120_000,
+        });
+
+        if (result.verdict === 'PASS') {
+          state.updateCase(c.id, { status: 'verified', review_note: 'Verifier: PASS' });
+          passed++;
+          console.log(`  ✓ ${c.id}`);
+        } else {
+          state.updateCase(c.id, { status: 'verify_rejected', review_note: `Verifier: ${result.reason}` });
+          rejected++;
+          console.log(`  ✗ ${c.id}: ${result.reason}`);
+        }
+      } catch (err) {
+        if (isStoppingError(err)) throw err;  // quota/auth → stop the phase
+        state.updateCase(c.id, { status: 'verify_error', review_note: `Error: ${err.message}` });
+        errored++;
+        console.error(`  ✗ ${c.id}: error — ${err.message}`);
+      }
+
+      await sleep(1000); // Brief pause between verifier calls
+    }
+  }
+
+  if (!drained) {
     console.log('  No cases pending verification.');
     return {};
   }
-
-  console.log(`  Verifying ${cases.length} case(s) with the independent AI auditor...`);
-  let passed = 0;
-  let failed = 0;
-
-  for (const c of cases) {
-    const payload = JSON.parse(c.payload_json);
-    state.updateCase(c.id, { verify_attempts: (c.verify_attempts ?? 0) + 1 });
-
-    // Get original thread text
-    const thread = state.getThread(c.thread_id);
-    if (!thread?.thread_text) {
-      console.log(`  ⊘ ${c.id}: no thread text available, skipping`);
-      state.updateCase(c.id, { status: 'verify_skipped', review_note: 'No thread text' });
-      continue;
-    }
-
-    try {
-      const result = await verifyCase(thread.thread_text, payload, {
-        timeoutMs: opts.verifyTimeoutMs || 120_000,
-      });
-
-      if (result.verdict === 'PASS') {
-        state.updateCase(c.id, { status: 'verified', review_note: 'Verifier: PASS' });
-        passed++;
-        console.log(`  ✓ ${c.id}`);
-      } else {
-        state.updateCase(c.id, { status: 'verify_rejected', review_note: `Verifier: ${result.reason}` });
-        failed++;
-        console.log(`  ✗ ${c.id}: ${result.reason}`);
-      }
-    } catch (err) {
-      if (isStoppingError(err)) throw err;  // quota/auth → stop the phase
-      state.updateCase(c.id, { status: 'verify_error', review_note: `Error: ${err.message}` });
-      failed++;
-      console.error(`  ✗ ${c.id}: error — ${err.message}`);
-    }
-
-    await sleep(1000); // Brief pause between verifier calls
-  }
-
-  console.log(`  Verification done: ${passed} passed, ${failed} failed.`);
-  return { cases_verified: passed };
+  console.log(`  Verification done: ${passed} passed, ${rejected} rejected, ${errored} errored.`);
+  // cases_verify_rejected feeds the night report's true verify_pass_rate — the
+  // report sums per-run throughput (what happened tonight) instead of the
+  // created-that-night case cohort (which lags verify by 1–2 nights). Errors are
+  // excluded: a transient failure is not a quality rejection.
+  return { cases_verified: passed, cases_verify_rejected: rejected };
 }
 
 // ---------------------------------------------------------------------------
@@ -686,71 +804,78 @@ async function phaseVerify(state, opts) {
 async function phaseCrosscheck(state, opts) {
   console.log('\n── Phase: CROSSCHECK ──');
 
-  const cases = state.getCasesForCrosscheck(opts.batchSize, CROSSCHECK_RETRY_LIMIT);
-  if (cases.length === 0) {
-    console.log('  No verified cases pending crosscheck.');
-    return {};
-  }
-
-  const { supabaseUrl, supabaseKey } = requireSupabaseConfig('read');
-
   let passed = 0;
   let dupes = 0;
   let errors = 0;
+  let drained = false;
 
-  for (const c of cases) {
-    const payload = JSON.parse(c.payload_json);
-    state.updateCase(c.id, { crosscheck_attempts: (c.crosscheck_attempts ?? 0) + 1 });
+  // Drain the whole queue batch-by-batch — see phaseVerify for the rationale
+  // (verify now drains, so crosscheck/import must keep up in the same run).
+  while (!pastDeadline()) {
+    const cases = state.getCasesForCrosscheck(opts.batchSize, CROSSCHECK_RETRY_LIMIT);
+    if (cases.length === 0) break;
+    drained = true;
+    const { supabaseUrl, supabaseKey } = requireSupabaseConfig('read');
 
-    const localDuplicates = state.getCasesForThread(c.thread_id, c.id)
-      .filter(other => LOCAL_DUPLICATE_STATUSES.has(other.status))
-      .some(other => isLikelyLocalDuplicate(payload, safeJsonParse(other.payload_json)));
+    for (const c of cases) {
+      if (pastDeadline()) break;
+      const payload = JSON.parse(c.payload_json);
+      state.updateCase(c.id, { crosscheck_attempts: (c.crosscheck_attempts ?? 0) + 1 });
 
-    if (localDuplicates) {
-      state.updateCase(c.id, {
-        status: 'crosscheck_dupe',
-        review_note: 'Duplicate of an existing local case for the same thread',
-      });
-      dupes++;
-      continue;
-    }
+      const localDuplicates = state.getCasesForThread(c.thread_id, c.id)
+        .filter(other => LOCAL_DUPLICATE_STATUSES.has(other.status))
+        .some(other => isLikelyLocalDuplicate(payload, safeJsonParse(other.payload_json)));
 
-    try {
-      const result = await crosscheckCaseAgainstSupabase({
-        supabaseUrl,
-        supabaseKey,
-        payload,
-      });
-
-      if (result.status === 'error') {
+      if (localDuplicates) {
         state.updateCase(c.id, {
-          status: 'crosscheck_error',
-          review_note: result.reviewNote,
+          status: 'crosscheck_dupe',
+          review_note: 'Duplicate of an existing local case for the same thread',
         });
-        errors++;
-        console.error(`  Crosscheck query failed for ${c.id}: HTTP ${result.httpStatus}`);
-        continue;
-      }
-
-      if (result.status === 'duplicate') {
-        state.updateCase(c.id, { status: 'crosscheck_dupe', review_note: 'Duplicate resolution in Supabase' });
         dupes++;
         continue;
       }
-    } catch (err) {
-      state.updateCase(c.id, {
-        status: 'crosscheck_error',
-        review_note: `Crosscheck error: ${err.message}`,
-      });
-      errors++;
-      console.error(`  Crosscheck query failed for ${c.id}: ${err.message}`);
-      continue;
-    }
 
-    state.updateCase(c.id, { status: 'import_ready' });
-    passed++;
+      try {
+        const result = await crosscheckCaseAgainstSupabase({
+          supabaseUrl,
+          supabaseKey,
+          payload,
+        });
+
+        if (result.status === 'error') {
+          state.updateCase(c.id, {
+            status: 'crosscheck_error',
+            review_note: result.reviewNote,
+          });
+          errors++;
+          console.error(`  Crosscheck query failed for ${c.id}: HTTP ${result.httpStatus}`);
+          continue;
+        }
+
+        if (result.status === 'duplicate') {
+          state.updateCase(c.id, { status: 'crosscheck_dupe', review_note: 'Duplicate resolution in Supabase' });
+          dupes++;
+          continue;
+        }
+      } catch (err) {
+        state.updateCase(c.id, {
+          status: 'crosscheck_error',
+          review_note: `Crosscheck error: ${err.message}`,
+        });
+        errors++;
+        console.error(`  Crosscheck query failed for ${c.id}: ${err.message}`);
+        continue;
+      }
+
+      state.updateCase(c.id, { status: 'import_ready' });
+      passed++;
+    }
   }
 
+  if (!drained) {
+    console.log('  No verified cases pending crosscheck.');
+    return {};
+  }
   console.log(`  Crosscheck done: ${passed} ready for import, ${dupes} duplicates skipped, ${errors} errors held back.`);
   return {};
 }
@@ -762,88 +887,95 @@ async function phaseCrosscheck(state, opts) {
 async function phaseImport(state, opts) {
   console.log('\n── Phase: IMPORT ──');
 
-  const cases = state.getCasesForImport(opts.batchSize, IMPORT_RETRY_LIMIT);
-  if (cases.length === 0) {
+  let imported = 0;
+  let failed = 0;
+  let drained = false;
+
+  // Drain the whole queue batch-by-batch — see phaseVerify for the rationale
+  // (verify now drains, so import must keep up in the same run).
+  while (!pastDeadline()) {
+    const cases = state.getCasesForImport(opts.batchSize, IMPORT_RETRY_LIMIT);
+    if (cases.length === 0) break;
+    drained = true;
+    const { supabaseUrl, supabaseKey } = requireSupabaseConfig('function');
+
+    for (const c of cases) {
+      if (pastDeadline()) break;
+      const payload = JSON.parse(c.payload_json);
+      state.updateCase(c.id, { import_attempts: (c.import_attempts ?? 0) + 1 });
+      const normalizedDescription = normalizeImportText(payload.description || '');
+      const normalizedResolution = normalizeImportText(payload.resolution || '');
+      const importResolution = clampResolutionForImport(normalizedResolution);
+      const sanitizationNote = importResolution !== normalizedResolution
+        ? `Resolution trimmed for import (${normalizedResolution.length} → ${importResolution.length})`
+        : null;
+
+      if (importResolution.length < RESOLUTION_MIN_LENGTH) {
+        state.updateCase(c.id, {
+          status: 'import_failed',
+          review_note: `Resolution too short for import after sanitization (${importResolution.length} < ${RESOLUTION_MIN_LENGTH})`,
+        });
+        failed++;
+        console.log(`  ✗ ${c.id.slice(0, 8)}: resolution too short`);
+        continue;
+      }
+
+      try {
+        // Inline canonicalization: new imports get the catalog's exact brand spelling
+        // (casing/diacritics/alias), so they are discoverable in the app from the start
+        // (search filters vehicle_brand by exact match). Model-level gaps stay as-is and
+        // are handled by the Phase-2 catalog-proposal flow, not silently remapped.
+        const _rawBrand = payload.vehicle_brand || payload.brand_raw || '';
+        const _veh = resolveVehicle({ vehicle_brand: _rawBrand, vehicle_model: payload.vehicle_model || payload.model_raw || '' });
+        const vehicleBrandCanonical = _veh.matched ? _veh.canonicalBrand : _rawBrand;
+        const res = await fetch(`${supabaseUrl}/functions/v1/push-case`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${supabaseKey}`,
+          },
+          body: JSON.stringify({
+            local_id: c.id,
+            user_id: 'ai_importer',
+            vehicle_brand: vehicleBrandCanonical,
+            vehicle_model: payload.vehicle_model || payload.model_raw || '',
+            engine_power: payload.engine_power || payload.engine_raw || '',
+            symptoms: payload.symptoms || [],
+            obd_codes: payload.obd_codes || [],
+            description: normalizedDescription,
+            resolution: importResolution,
+            source_ref: payload.source_ref || `agent:${c.id.slice(0, 12)}`,
+            thread_url: payload.thread_url || payload.source_url || '',
+          }),
+        });
+
+        if (res.ok) {
+          state.updateCase(c.id, {
+            status: 'imported',
+            review_note: sanitizationNote ? `Pushed to Supabase. ${sanitizationNote}` : 'Pushed to Supabase',
+          });
+          imported++;
+          console.log(`  ✓ ${c.id.slice(0, 8)}`);
+        } else {
+          const errBody = await res.text().catch(() => '');
+          state.updateCase(c.id, { status: 'import_failed', review_note: `HTTP ${res.status}: ${errBody.slice(0, 200)}` });
+          failed++;
+          console.log(`  ✗ ${c.id.slice(0, 8)}: HTTP ${res.status}`);
+        }
+      } catch (err) {
+        state.updateCase(c.id, { status: 'import_failed', review_note: `Error: ${err.message}` });
+        failed++;
+        console.error(`  ✗ ${c.id.slice(0, 8)}: ${err.message}`);
+      }
+
+      await sleep(500);
+    }
+  }
+
+  if (!drained) {
     console.log('  No cases ready for import.');
     return {};
   }
-
-  const { supabaseUrl, supabaseKey } = requireSupabaseConfig('function');
-
-  let imported = 0;
-  let failed = 0;
-
-  for (const c of cases) {
-    const payload = JSON.parse(c.payload_json);
-    state.updateCase(c.id, { import_attempts: (c.import_attempts ?? 0) + 1 });
-    const normalizedDescription = normalizeImportText(payload.description || '');
-    const normalizedResolution = normalizeImportText(payload.resolution || '');
-    const importResolution = clampResolutionForImport(normalizedResolution);
-    const sanitizationNote = importResolution !== normalizedResolution
-      ? `Resolution trimmed for import (${normalizedResolution.length} → ${importResolution.length})`
-      : null;
-
-    if (importResolution.length < RESOLUTION_MIN_LENGTH) {
-      state.updateCase(c.id, {
-        status: 'import_failed',
-        review_note: `Resolution too short for import after sanitization (${importResolution.length} < ${RESOLUTION_MIN_LENGTH})`,
-      });
-      failed++;
-      console.log(`  ✗ ${c.id.slice(0, 8)}: resolution too short`);
-      continue;
-    }
-
-    try {
-      // Inline canonicalization: new imports get the catalog's exact brand spelling
-      // (casing/diacritics/alias), so they are discoverable in the app from the start
-      // (search filters vehicle_brand by exact match). Model-level gaps stay as-is and
-      // are handled by the Phase-2 catalog-proposal flow, not silently remapped.
-      const _rawBrand = payload.vehicle_brand || payload.brand_raw || '';
-      const _veh = resolveVehicle({ vehicle_brand: _rawBrand, vehicle_model: payload.vehicle_model || payload.model_raw || '' });
-      const vehicleBrandCanonical = _veh.matched ? _veh.canonicalBrand : _rawBrand;
-      const res = await fetch(`${supabaseUrl}/functions/v1/push-case`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${supabaseKey}`,
-        },
-        body: JSON.stringify({
-          local_id: c.id,
-          user_id: 'ai_importer',
-          vehicle_brand: vehicleBrandCanonical,
-          vehicle_model: payload.vehicle_model || payload.model_raw || '',
-          engine_power: payload.engine_power || payload.engine_raw || '',
-          symptoms: payload.symptoms || [],
-          obd_codes: payload.obd_codes || [],
-          description: normalizedDescription,
-          resolution: importResolution,
-          source_ref: payload.source_ref || `agent:${c.id.slice(0, 12)}`,
-          thread_url: payload.thread_url || payload.source_url || '',
-        }),
-      });
-
-      if (res.ok) {
-        state.updateCase(c.id, {
-          status: 'imported',
-          review_note: sanitizationNote ? `Pushed to Supabase. ${sanitizationNote}` : 'Pushed to Supabase',
-        });
-        imported++;
-        console.log(`  ✓ ${c.id.slice(0, 8)}`);
-      } else {
-        const errBody = await res.text().catch(() => '');
-        state.updateCase(c.id, { status: 'import_failed', review_note: `HTTP ${res.status}: ${errBody.slice(0, 200)}` });
-        failed++;
-        console.log(`  ✗ ${c.id.slice(0, 8)}: HTTP ${res.status}`);
-      }
-    } catch (err) {
-      state.updateCase(c.id, { status: 'import_failed', review_note: `Error: ${err.message}` });
-      failed++;
-      console.error(`  ✗ ${c.id.slice(0, 8)}: ${err.message}`);
-    }
-
-    await sleep(500);
-  }
-
   console.log(`  Import done: ${imported} imported, ${failed} failed.`);
   return { cases_imported: imported };
 }
@@ -896,6 +1028,7 @@ function createEmptyRunStats() {
     threads_processed: 0,
     cases_extracted: 0,
     cases_verified: 0,
+    cases_verify_rejected: 0,
     cases_imported: 0,
   };
 }
@@ -948,6 +1081,10 @@ async function runOnce(state, opts) {
     const phases = opts.phase ? [opts.phase] : ['discover', 'calibrate', 'crawl', 'verify', 'crosscheck', 'import'];
 
     for (const phase of phases) {
+      if (pastDeadline()) {
+        console.log(`\n  ⏱ Window deadline reached — skipping remaining phases (they resume next run).`);
+        break;
+      }
       setLogPhase(phase);
       let phaseStats = null;
       switch (phase) {
@@ -1068,7 +1205,14 @@ async function main() {
   state.close();
 }
 
-main().catch(err => {
-  console.error('Fatal:', err);
-  process.exit(1);
-});
+const invokedDirectly = (() => {
+  try { return !!process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; }
+})();
+
+if (invokedDirectly) {
+  main().catch(err => {
+    console.error('Fatal:', err);
+    process.exit(1);
+  });
+}

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [string]$TaskName = 'DriveCodexDailyCoach',
-  [string]$At = '06:20',          # after the 21:00–06:00 crawl window closes
+  [string]$At = '06:20',          # after the 22:00–06:00 crawl window closes
   [string]$NodePath,
   [string]$LogDir,
   [switch]$RunNow
@@ -29,12 +29,16 @@ if ($LogDir)   { $argParts += @('-LogDir',  (Quote-TaskArg ([System.IO.Path]::Ge
 $action = New-ScheduledTaskAction -Execute $powershellExe -Argument ($argParts -join ' ') -WorkingDirectory $repoRoot
 $trigger = New-ScheduledTaskTrigger -Daily -At $At
 
+# ExecutionTimeLimit 4h: the chain (watchdog → coach → auditor → alert → triage →
+# recalibration) takes ~2h on a busy morning. The original 1h limit made the
+# scheduler KILL it mid-chain every day (LastTaskResult 267014) — guarded
+# recalibration silently never ran and triage finished as an orphaned process.
 $settings = New-ScheduledTaskSettingsSet `
   -StartWhenAvailable `
   -AllowStartIfOnBatteries `
   -DontStopIfGoingOnBatteries `
   -MultipleInstances IgnoreNew `
-  -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
+  -ExecutionTimeLimit (New-TimeSpan -Hours 4) `
   -RestartCount 2 `
   -RestartInterval (New-TimeSpan -Minutes 10)
 

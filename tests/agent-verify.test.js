@@ -110,6 +110,8 @@ function testPromptAnchors() {
   assert.match(prompt, /light pickup/i, 'light pickups declared in scope');
   assert.match(prompt, /does not matter who carried it out/i, 'single-author requirement relaxed');
   assert.match(prompt, /resolution may be provided or carried out by another user/i, 'resolution may come from a helper');
+  // Anti-injection: the thread block is framed as untrusted data, not instructions.
+  assert.match(prompt, /untrusted forum content|NOT instructions/i, 'thread is flagged untrusted (prompt-injection hardening)');
 }
 
 // ── verifyCase end-to-end with stubbed DeepSeek ─────────────────────────────

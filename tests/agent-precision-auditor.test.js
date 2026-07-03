@@ -123,10 +123,28 @@ assert.equal(QUALITY_BAR, BAR_VIA_RECALL, 'recall-watchdog re-exports the exact 
   d = shouldAlertPrecision([w('d'), w('d'), ok(), ok(), { parseFail: true }, { errored: true }]);
   assert.equal(d.judged, 4, 'coverage-gap rows not counted'); assert.equal(d.clusterHit, true);
 
-  // pooled path fires regardless of a calm today
-  d = shouldAlertPrecision([ok(), ok(), ok(), ok()], { wrong: 3, judged: 14 });
-  assert.equal(d.pooledHit, true); assert.equal(d.alert, true);
-  d = shouldAlertPrecision([ok(), ok(), ok(), ok()], { wrong: 2, judged: 14 });
+  // ── pooled path is now TREND-AWARE (severe OR regression), so it can go quiet ──
+  const calm = [ok(), ok(), ok(), ok()];
+
+  // severe: pooled ratio >= SEVERE_RATE (0.30) and wrong >= poolMin → marker
+  d = shouldAlertPrecision(calm, { wrong: 6, judged: 14 }); // 43%
+  assert.equal(d.severeHit, true); assert.equal(d.pooledHit, true); assert.equal(d.alert, true);
+
+  // regression: moderate 21% but well above a low baseline (1.5× 6.7%) → marker
+  d = shouldAlertPrecision(calm, { wrong: 3, judged: 14 }, { baseline: { wrong: 4, judged: 60 } });
+  assert.equal(d.severeHit, false); assert.equal(d.regressionHit, true); assert.equal(d.alert, true);
+
+  // high-but-STABLE: 21% with a matching ~20% baseline, below severe → QUIET
+  // (this is the fatigue fix: a known, being-worked level stops screaming)
+  d = shouldAlertPrecision(calm, { wrong: 3, judged: 14 }, { baseline: { wrong: 15, judged: 75 } });
+  assert.equal(d.severeHit, false); assert.equal(d.regressionHit, false); assert.equal(d.alert, false);
+
+  // no baseline + not severe → no pooled alarm (regression can't be assessed)
+  d = shouldAlertPrecision(calm, { wrong: 3, judged: 14 });
+  assert.equal(d.pooledHit, false); assert.equal(d.alert, false);
+
+  // pool floor: wrong < poolMin never fires even if the ratio is high
+  d = shouldAlertPrecision(calm, { wrong: 2, judged: 4 }); // 50% but only 2 wrong
   assert.equal(d.pooledHit, false); assert.equal(d.alert, false);
 }
 

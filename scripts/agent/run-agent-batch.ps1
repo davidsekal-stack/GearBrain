@@ -4,7 +4,13 @@ param(
   [int]$SleepMs = 600,
   [string]$Phase,
   [string]$NodePath,
-  [string]$LogDir
+  [string]$LogDir,
+  # Night crawl window bounds — keep in sync with the trigger registered by
+  # register-agent-task.ps1 (-Nightly). Used only to compute the orchestrator's
+  # clean-stop deadline; runs started OUTSIDE the window get no deadline.
+  [int]$NightStartHour = 22,
+  [int]$NightEndHour = 6,
+  [int]$DeadlineMarginMinutes = 10
 )
 
 Set-StrictMode -Version Latest
@@ -217,6 +223,27 @@ Tento soubor zmizi sam, jakmile crawler zase pobezi.
     exit 0
   }
 
+  # ── Step 0b: night-window deadline ──
+  # Task Scheduler's StopAtDurationEnd kills only THIS wrapper at the window end
+  # (06:00); the node orchestrator survived it and kept crawling unsupervised
+  # (e.g. run 1477 finished 06:46, overlapping the 06:20 coach on the same
+  # agent.db). Give the orchestrator an explicit deadline (window end minus a
+  # margin) via AGENT_DEADLINE_EPOCH_MS so it stops cleanly by itself, and do
+  # not even start a new run inside the margin.
+  $nowLocal = Get-Date
+  $windowEnd = $null
+  if ($nowLocal.Hour -ge $NightStartHour) { $windowEnd = $nowLocal.Date.AddDays(1).AddHours($NightEndHour) }
+  elseif ($nowLocal.Hour -lt $NightEndHour) { $windowEnd = $nowLocal.Date.AddHours($NightEndHour) }
+  if ($windowEnd) {
+    $deadline = $windowEnd.AddMinutes(-$DeadlineMarginMinutes)
+    if ($nowLocal -ge $deadline) {
+      Write-LogLine -Path $logPath -Message ("Skip: inside the end-of-window margin ({0} - {1}); not starting a new run." -f $deadline.ToString('HH:mm'), $windowEnd.ToString('HH:mm'))
+      exit 0
+    }
+    $env:AGENT_DEADLINE_EPOCH_MS = [string]([datetimeoffset]$deadline).ToUnixTimeMilliseconds()
+    Write-LogLine -Path $logPath -Message ("Run deadline: {0} (window ends {1})." -f $deadline.ToString('HH:mm'), $windowEnd.ToString('HH:mm'))
+  }
+
   # ── Step 1: refresh the cross-source "already-extracted" index from the DB (NON-FATAL) ──
   # Keeps crawled-index.json current so the orchestrator skips anything already extracted
   # (by this agent, the legacy forum-seed scripts, or NHTSA) since the last batch.
@@ -296,6 +323,17 @@ Tento soubor zmizi sam, jakmile crawler zase pobezi.
     Remove-Item $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
   }
 
+  # Po quota/auth stopu (exit 75/76) je předplatné vyčerpané — nepálit další dva
+  # Claude-heavy sweepy proti mrtvé kvótě. A po deadlinu okna je nespouštět taky
+  # (běžely by za 06:00 do ranní coach dávky).
+  $skipPostSteps = ($exitCode -eq 75) -or ($exitCode -eq 76)
+  if (-not $skipPostSteps -and $env:AGENT_DEADLINE_EPOCH_MS) {
+    if ([datetimeoffset]::UtcNow.ToUnixTimeMilliseconds() -ge [long]$env:AGENT_DEADLINE_EPOCH_MS) { $skipPostSteps = $true }
+  }
+  if ($skipPostSteps) {
+    Write-LogLine -Path $logPath -Message "Skipping post-crawl sweeps (quota/auth stop or window deadline)."
+  }
+
   # ── Step 2: zatřídění nově schválených případů do číselníku závad (NON-FATAL) ──
   # Doplní canonical_fault_id u approved případů, které ho nemají (push-case
   # klasifikuje jen "na měkko" a importy se skip_translation ji přeskakují).
@@ -303,7 +341,7 @@ Tento soubor zmizi sam, jakmile crawler zase pobezi.
   # (--classify bere jen NULL případy), --max ohraničí délku jednoho běhu.
   # Selhání NESMÍ ovlivnit výsledek crawl běhu — jen se zaloguje.
   $faultTaxonomy = Join-Path $agentDir 'fault-taxonomy.mjs'
-  if (Test-Path $faultTaxonomy) {
+  if ((-not $skipPostSteps) -and (Test-Path $faultTaxonomy)) {
     Write-LogLine -Path $logPath -Message "Classifying newly approved cases into fault taxonomy..."
     $clsOut = [System.IO.Path]::GetTempFileName()
     $clsErr = [System.IO.Path]::GetTempFileName()
@@ -339,7 +377,7 @@ Tento soubor zmizi sam, jakmile crawler zase pobezi.
   # zobrazuje v jazyce aplikace. Resumovatelné, --max ohraničí délku běhu.
   # Selhání NESMÍ ovlivnit výsledek crawl běhu — jen se zaloguje.
   $resI18n = Join-Path $agentDir 'backfill-resolution-i18n.mjs'
-  if (Test-Path $resI18n) {
+  if ((-not $skipPostSteps) -and (Test-Path $resI18n)) {
     Write-LogLine -Path $logPath -Message "Backfilling localized resolution texts (cs/de)..."
     $i18nOut = [System.IO.Path]::GetTempFileName()
     $i18nErr = [System.IO.Path]::GetTempFileName()

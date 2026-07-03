@@ -366,7 +366,8 @@ export async function enumerateThreadUrlsDeep(forum, calibration = {}, opts = {}
       const nextUrl = findNextPageLink(
         html,
         pageUrl,
-        calibration.section_pagination_selector || calibration.pagination_selector
+        calibration.section_pagination_selector || calibration.pagination_selector,
+        { numbered: calibration.pagination_mode === 'numbered', numberRe: calibration.pagination_number_re }
       );
       const canonicalNext = nextUrl ? canonicalizeTraversalUrl(nextUrl) : null;
       if (!canonicalNext || canonicalNext === pageUrl) {

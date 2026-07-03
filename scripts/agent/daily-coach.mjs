@@ -119,7 +119,7 @@ const EMPTY_AGG = { metrics: {}, byForum: [], rejectConditions: {}, discardBucke
  * long ago — so yield (cases ÷ processed) reflects real per-thread conversion,
  * not a created_at artifact. `cases` rows carry forum_id (joined in the reader).
  */
-export function aggregateNight({ threads = [], cases = [], forums = [] } = {}) {
+export function aggregateNight({ threads = [], cases = [], forums = [], runs } = {}) {
   // 'deferred' = fetched but set aside as too-young; like 'pending' it is not a
   // real verdict, so it must not count as processed (else a forum that merely
   // defers young threads looks "busy but barren" and triggers a false recal).
@@ -136,18 +136,39 @@ export function aggregateNight({ threads = [], cases = [], forums = [] } = {}) {
 
   const statusHist = {};
   const rejectConditions = {};
-  let verifyPassed = 0, verifyRejected = 0, imported = 0;
+  // Cohort-based fallbacks (used only when no `runs` are supplied, e.g. a
+  // standalone call): status of cases CREATED this window, read now.
+  let cohortVerifyPassed = 0, cohortVerifyRejected = 0, cohortImported = 0;
   for (const c of cases) {
     statusHist[c.status] = (statusHist[c.status] || 0) + 1;
-    if (VERIFY_PASSED.has(c.status)) verifyPassed++;
-    if (c.status === 'imported') imported++;
+    if (VERIFY_PASSED.has(c.status)) cohortVerifyPassed++;
+    if (c.status === 'imported') cohortImported++;
     if (c.status === 'verify_rejected') {
-      verifyRejected++;
+      cohortVerifyRejected++;
       const cond = failingCondition(c.review_note);
       rejectConditions[cond] = (rejectConditions[cond] || 0) + 1;
     }
   }
   const casesExtracted = cases.length;
+
+  // Verify/import THROUGHPUT — what actually happened this night. Sourced from
+  // the runs table (per-run counters), NOT the created-tonight case cohort:
+  // verify/import lag extraction by 1–2 nights, so the cohort reported
+  // "verified: 0" on nights that in fact verified+imported ~120 cases, and made
+  // yield_rate blow past 100 % on catch-up nights. When `runs` is omitted the
+  // function falls back to the cohort so it stays usable standalone.
+  const useRuns = Array.isArray(runs);
+  let verifyPassed, verifyRejected, imported;
+  if (useRuns) {
+    const sum = (k) => runs.reduce((a, r) => a + (r[k] || 0), 0);
+    verifyPassed = sum('cases_verified');
+    verifyRejected = sum('cases_verify_rejected');
+    imported = sum('cases_imported');
+  } else {
+    verifyPassed = cohortVerifyPassed;
+    verifyRejected = cohortVerifyRejected;
+    imported = cohortImported;
+  }
 
   // Per-forum night stats over the UNION of forums seen in threads OR cases, so a
   // busy-but-barren forum (threads processed, zero cases) still emits explicit zeros
@@ -184,7 +205,10 @@ export function aggregateNight({ threads = [], cases = [], forums = [] } = {}) {
     verify_rejected: verifyRejected,
     yield_rate: ratio(casesExtracted, threadsProcessed),
     verify_pass_rate: ratio(verifyPassed, verifyPassed + verifyRejected),
-    import_rate: ratio(imported, casesExtracted),
+    // Funnel step AFTER verify (crosscheck survival), so numerator/denominator
+    // share the runs cohort — was imported/casesExtracted, which mixed the runs
+    // throughput with the created-tonight cohort and could exceed 100 %.
+    import_rate: ratio(imported, verifyPassed),
   };
   for (const [b, n] of Object.entries(discardBuckets)) metrics[`discarded:${b}`] = n;
   for (const [c, n] of Object.entries(rejectConditions)) metrics[`verify_reject:${c}`] = n;
@@ -413,7 +437,7 @@ async function main() {
     const forums = state.getAllForums();
 
     const degenerate = detectDegenerate({ runs, threads, cases });
-    const agg = degenerate ? EMPTY_AGG : aggregateNight({ threads, cases, forums });
+    const agg = degenerate ? EMPTY_AGG : aggregateNight({ threads, cases, forums, runs });
 
     // Record metrics BEFORE planning so the multi-night series include tonight.
     // Real night only, never in --dry-run.

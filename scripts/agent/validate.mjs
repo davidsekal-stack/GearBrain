@@ -137,6 +137,72 @@ function validateCaseAuthor(item, postMetaByNumber) {
 }
 
 // ---------------------------------------------------------------------------
+// Confirmation-quote anchor (clause (d): owner confirmed the fix worked)
+// ---------------------------------------------------------------------------
+
+// Whitespace-collapse + lowercase, faithful to the thread text (keeps
+// punctuation) — same normalization the triage/audit quote-verifiers use, so a
+// verbatim excerpt matches but a paraphrase/fabrication does not.
+function normalizeForQuote(s) {
+  return (s ?? '').toString().toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+const MIN_CONFIRMATION_QUOTE_CHARS = 8;
+
+/**
+ * Machine-check clause (d): if the extractor claims an owner confirmation, it
+ * must be REAL and by the OWNER. Returns a reason string to REJECT, or null.
+ *
+ * HARD-blocks the two leak classes the verifier's prose let through (measured
+ * 28/70 wrongly-approved, 2026-07): a confirmation quote copied from a DIFFERENT
+ * user's post (borrowed from someone else's car), and a fabricated confirmation
+ * that isn't in the thread at all. A MISSING confirmation is NOT blocked here —
+ * that call is left to the (now tightened, always-on) verify.mjs semantic gate,
+ * so a mere extractor omission can't crater recall to zero.
+ */
+function confirmationReason(item, postMetaByNumber, bodies) {
+  const rawPost = item.confirmation_post_number;
+  const quote = (item.confirmation_quote ?? '').toString().trim();
+  const hasPost = rawPost != null && rawPost !== '';
+  const hasQuote = quote.length > 0;
+
+  // Nothing claimed → defer to verify.mjs (do not block deterministically).
+  if (!hasPost && !hasQuote) return null;
+
+  // Partial claim (one without the other) is malformed → reject.
+  if (hasPost !== hasQuote) {
+    return 'Confirmation is incomplete (needs BOTH a post number and a verbatim quote)';
+  }
+
+  const postNumber = Number(rawPost);
+  if (!Number.isInteger(postNumber) || postNumber <= 0) {
+    return `Invalid confirmation_post_number: ${rawPost}`;
+  }
+  const meta = postMetaByNumber.get(postNumber);
+  if (!meta) {
+    return `Confirmation post ${postNumber} not found in thread`;
+  }
+
+  // The confirmation MUST be the owner's own later statement, not a bystander's.
+  const caseAuthor = normalizeText(item.case_author || '');
+  if (caseAuthor && meta.author && normalizeText(meta.author) !== caseAuthor) {
+    return `Confirmation post ${postNumber} is by "${meta.author}", not the case owner "${item.case_author}" (borrowed confirmation)`;
+  }
+
+  if (quote.length < MIN_CONFIRMATION_QUOTE_CHARS) {
+    return `Confirmation quote too short (${quote.length} chars)`;
+  }
+
+  // The quote must be a verbatim excerpt of THAT post's body (anti-fabrication).
+  const body = normalizeForQuote(bodies.get(postNumber) || '');
+  if (!body.includes(normalizeForQuote(quote))) {
+    return `Confirmation quote is not a verbatim excerpt of post ${postNumber} (possible fabrication)`;
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Vehicle-anchor (wrong-vehicle bleed) guard
 // ---------------------------------------------------------------------------
 
@@ -250,6 +316,15 @@ export function validateCase(caseData, options = {}) {
       // helper's resolution post that may name a different car.
       const bleed = vehicleBleedReason(caseData, options.threadText, postMeta);
       if (bleed) return { valid: false, reason: bleed, warnings };
+
+      // Clause (d): a CLAIMED owner-confirmation must be real and by the owner.
+      // (A missing one is deferred to verify.mjs, not blocked here.)
+      const { bodies } = parseThreadRegions(options.threadText);
+      const confReason = confirmationReason(caseData, postMeta, bodies);
+      if (confReason) return { valid: false, reason: confReason, warnings };
+      if (!caseData.confirmation_quote) {
+        warnings.push('No owner confirmation quote extracted (verifier will judge clause d)');
+      }
     }
   }
 

@@ -199,6 +199,16 @@ CREATE INDEX IF NOT EXISTS idx_coach_journal_forum
   ON coach_journal(forum_id, date);
 `;
 
+// One-shot legacy repair versioning. #repairLegacyState used to run on EVERY
+// writable open — a full scan of all threads (incl. ~50 MB of thread_text into
+// the JS heap) plus an unconditional rewrite of every case row, paid by every
+// tool that opens the DB (orchestrator 6×/night + the whole morning coach
+// chain + manual tools). It is a data MIGRATION, not an invariant check: run it
+// once, stamp agent_meta, skip until the version is bumped. Bump the version
+// whenever canonicalization/repair rules change so the repair runs once more.
+const LEGACY_REPAIR_KEY = 'legacy_repair_version';
+const LEGACY_REPAIR_VERSION = 1;
+
 export class AgentState {
   #db;
   #readOnly = false;
@@ -206,6 +216,11 @@ export class AgentState {
   constructor(dbPath = DEFAULT_DB_PATH, options = {}) {
     this.#readOnly = options.readOnly === true;
     this.#db = new DatabaseSync(dbPath, { readOnly: this.#readOnly });
+    // Concurrent openers exist by design (orchestrator tail vs the 06:20 coach
+    // chain vs manual tools). Wait for a busy writer instead of throwing
+    // SQLITE_BUSY instantly — a BEGIN IMMEDIATE collision used to crash the
+    // coach mid-chain and that morning's report/adapt silently didn't happen.
+    this.#db.exec('PRAGMA busy_timeout=30000');
     if (!this.#readOnly) {
       this.#db.exec('PRAGMA journal_mode=WAL');
       this.#db.exec('PRAGMA foreign_keys=ON');
@@ -239,11 +254,25 @@ export class AgentState {
       // + the case id, so the revert path can restore a case status, not a forum.
       "ALTER TABLE coach_journal ADD COLUMN target_kind TEXT DEFAULT 'forum'",
       'ALTER TABLE coach_journal ADD COLUMN case_id TEXT',
+      // Per-run verify rejections — lets the night report compute the true
+      // verify_pass_rate from run throughput, not the lagging created-tonight cohort.
+      'ALTER TABLE runs ADD COLUMN cases_verify_rejected INTEGER DEFAULT 0',
+      // Consecutive no-progress-with-errors crawl batches (forum circuit breaker).
+      'ALTER TABLE forums ADD COLUMN consecutive_failures INTEGER DEFAULT 0',
+      // Last diary write (throttles the LLM diary to once/forum/day).
+      'ALTER TABLE forums ADD COLUMN diary_written_at TEXT',
     ];
     for (const sql of alterations) {
       try { this.#db.exec(sql); } catch { /* column already exists */ }
     }
-    this.#repairLegacyState();
+    if (Number(this.getMeta(LEGACY_REPAIR_KEY)) !== LEGACY_REPAIR_VERSION) {
+      this.#repairLegacyState();
+      this.setMeta(LEGACY_REPAIR_KEY, String(LEGACY_REPAIR_VERSION));
+    }
+    // Cheap crash-recovery invariant (quota-interrupted calibration), NOT a
+    // one-time migration — runs on every writable open, unlike the stamped
+    // legacy repair above.
+    this.#repairCalibrationState();
   }
 
   close() {
@@ -292,7 +321,8 @@ export class AgentState {
       'new_threads_last_batch', 'cases_total', 'last_crawled_at',
       'calibration_json', 'calibration_status', 'calibration_attempts',
       'cooldown_until', 'cooldown_tier_hours', 'cooldown_set_at',
-      'diary_md', 'priority_score', 'archive_cursor_json',
+      'diary_md', 'priority_score', 'archive_cursor_json', 'consecutive_failures',
+      'diary_written_at',
     ];
     const entries = Object.entries(fields).filter(([k]) => allowed.includes(k));
     if (entries.length === 0) return;
@@ -497,22 +527,6 @@ export class AgentState {
     return stmt.all(status, limit);
   }
 
-  getClassifiedThreads(limit = 50) {
-    const stmt = this.#db.prepare(
-      `SELECT * FROM threads WHERE status = 'classified'
-       ORDER BY created_at LIMIT ?`
-    );
-    return stmt.all(limit);
-  }
-
-  getExtractedThreads(limit = 50) {
-    const stmt = this.#db.prepare(
-      `SELECT * FROM threads WHERE status = 'extracted'
-       ORDER BY created_at LIMIT ?`
-    );
-    return stmt.all(limit);
-  }
-
   countThreadsByStatus() {
     const stmt = this.#db.prepare(
       'SELECT status, COUNT(*) as count FROM threads GROUP BY status'
@@ -645,6 +659,7 @@ export class AgentState {
          threads_processed = ?,
          cases_extracted = ?,
          cases_verified = ?,
+         cases_verify_rejected = ?,
          cases_imported = ?,
          stop_reason = ?
        WHERE id = ?`
@@ -653,6 +668,7 @@ export class AgentState {
       stats.threads_processed ?? 0,
       stats.cases_extracted ?? 0,
       stats.cases_verified ?? 0,
+      stats.cases_verify_rejected ?? 0,
       stats.cases_imported ?? 0,
       stopReason,
       runId,
@@ -922,7 +938,6 @@ export class AgentState {
     try {
       this.#repairLegacyThreads();
       this.#repairLegacyCases();
-      this.#repairCalibrationState();
       this.#db.exec('COMMIT');
     } catch (err) {
       this.#db.exec('ROLLBACK');

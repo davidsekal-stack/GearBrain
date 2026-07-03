@@ -141,11 +141,56 @@ export function buildThreadText({ url, title, posts, forumTitle = '', subforumTi
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$/;
 
+// EU/EN month names → 1-based month. Czech appears in both nominative and the
+// genitive form used in dates ("15. března"), German with/without umlaut folding,
+// English full + 3-letter. Lowercased keys; diacritics folded at lookup.
+const MONTH_NAMES = (() => {
+  const m = {};
+  const put = (n, ...words) => { for (const w of words) m[w] = n; };
+  put(1,  'leden', 'ledna', 'januar', 'january', 'jan');
+  put(2,  'unor', 'unora', 'februar', 'february', 'feb');
+  put(3,  'brezen', 'brezna', 'marz', 'march', 'mar', 'maerz');
+  put(4,  'duben', 'dubna', 'april', 'apr');
+  put(5,  'kveten', 'kvetna', 'mai', 'may');
+  put(6,  'cerven', 'cervna', 'juni', 'june', 'jun');
+  put(7,  'cervenec', 'cervence', 'juli', 'july', 'jul');
+  put(8,  'srpen', 'srpna', 'august', 'aug');
+  put(9,  'zari', 'september', 'sept', 'sep');
+  put(10, 'rijen', 'rijna', 'oktober', 'october', 'oct', 'okt');
+  put(11, 'listopad', 'listopadu', 'november', 'nov');
+  put(12, 'prosinec', 'prosince', 'dezember', 'december', 'dec', 'dez');
+  return m;
+})();
+
+function foldDiacritics(s) {
+  return s.normalize('NFKD').replace(/\p{M}+/gu, '');
+}
+
+// Build a UTC-midnight epoch from y/m/d, validating the calendar date. UTC keeps
+// the result independent of the runtime timezone (deterministic); for a 1-year
+// age gate the intra-day offset is irrelevant.
+function ymdToUtc(y, mo, d) {
+  if (!(y >= 1990 && y <= 2100) || !(mo >= 1 && mo <= 12) || !(d >= 1 && d <= 31)) return null;
+  const ms = Date.UTC(y, mo - 1, d);
+  const dt = new Date(ms);
+  // Reject overflow (e.g. 31.02 → Mar 3).
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return null;
+  return ms;
+}
+
 /**
  * Parse a post's `when` value to epoch milliseconds, or null if it is not a
- * reliably-absolute timestamp. Accepts ISO-8601 (the engine <time datetime>) and a
- * bare 10-digit unix-seconds / 13-digit unix-ms integer; everything else
- * (localized or relative date text) returns null = unknown age.
+ * reliably-absolute date. Accepts, in order:
+ *   - ISO-8601 (the engine <time datetime>) and bare unix epoch (10/13 digits);
+ *   - EU deterministic absolute dates the calibrated date_selector exposes as
+ *     visible text: `dd.mm.yyyy` / `dd. mm. yyyy` (EU dot = day-first),
+ *     `yyyy-mm-dd` / `yyyy.mm.dd` (year-first), and `15. března 2024` /
+ *     `15. März 2024` / `15 March 2024` / `March 15, 2024` (cs/de/en month names).
+ * Everything ambiguous or relative (slash dd/mm — US vs EU, "včera", "vor 2
+ * Stunden", 2-digit years) returns null = unknown age → caller processes now
+ * (the safe direction: we never silently drop a thread we cannot reliably date).
+ * Extending this DIRECTLY re-arms the >=1-year defer gate on the ~70 % of EU
+ * threads that render text dates rather than a machine <time datetime>.
  */
 export function parseWhenToDate(raw) {
   const s = (raw ?? '').toString().trim();
@@ -153,10 +198,34 @@ export function parseWhenToDate(raw) {
   // Bare unix epoch (seconds: 10 digits ~2001–2286, or milliseconds: 13 digits).
   if (/^\d{10}$/.test(s)) return Number(s) * 1000;
   if (/^\d{13}$/.test(s)) return Number(s);
-  // ISO-8601 only — guard against Date.parse's loose acceptance of garbage.
-  if (!ISO_DATE_RE.test(s)) return null;
-  const ms = Date.parse(s);
-  return Number.isFinite(ms) ? ms : null;
+  // ISO-8601 (or ISO-ish with a space) — guard against Date.parse's loose garbage.
+  if (ISO_DATE_RE.test(s)) {
+    const ms = Date.parse(s);
+    if (Number.isFinite(ms)) return ms;
+  }
+
+  // Take the first date-looking token out of a possibly longer visible string
+  // (e.g. "st 15. 03. 2024 14:23", "Beitrag vom 15. März 2024").
+  const folded = foldDiacritics(s.toLowerCase());
+
+  // Year-first: yyyy-mm-dd / yyyy.mm.dd / yyyy/mm/dd (unambiguous).
+  let m = folded.match(/\b(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})\b/);
+  if (m) return ymdToUtc(Number(m[1]), Number(m[2]), Number(m[3]));
+
+  // EU dot-separated day-first: dd.mm.yyyy / dd. mm. yyyy (4-digit year required).
+  // Dots (not slashes) are the EU convention → day-first is safe for our EU forums.
+  m = folded.match(/\b(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})\b/);
+  if (m) return ymdToUtc(Number(m[3]), Number(m[2]), Number(m[1]));
+
+  // Month-name: "15. brezna 2024" / "15 march 2024" (day month year).
+  m = folded.match(/\b(\d{1,2})\.?\s+([a-z]+)\.?\s+(\d{4})\b/);
+  if (m && MONTH_NAMES[m[2]]) return ymdToUtc(Number(m[3]), MONTH_NAMES[m[2]], Number(m[1]));
+
+  // Month-name English "month day, year": "march 15, 2024".
+  m = folded.match(/\b([a-z]+)\.?\s+(\d{1,2}),?\s+(\d{4})\b/);
+  if (m && MONTH_NAMES[m[1]]) return ymdToUtc(Number(m[3]), MONTH_NAMES[m[1]], Number(m[2]));
+
+  return null; // ambiguous (slash dd/mm), relative, or unrecognized → unknown age
 }
 
 /**
@@ -819,7 +888,44 @@ function resolvePageLink(href, baseUrl) {
   }
 }
 
-export function findNextPageLink(html, baseUrl, paginationSelector) {
+/**
+ * Numbered-pagination resolver for engines that render numbered page links but
+ * NO "next"/rel=next anchor (e.g. Snitz on BMW-Syndikat: page 1 = forum70_…html,
+ * page N = forum70w{N}_…html). OFF by default — only used when a forum profile
+ * sets `pagination_mode: 'numbered'`, so the 53 other forums are unaffected.
+ *
+ * It reads the CURRENT page number from `currentUrl` via `numberRe` (default the
+ * Snitz `w{N}_` token; profiles can override), then returns the candidate link
+ * whose page number is current+1. No such candidate ⇒ last page ⇒ null.
+ */
+export function nextNumberedPageUrl(html, currentUrl, { selector, numberRe } = {}) {
+  let re;
+  try { re = numberRe ? new RegExp(numberRe) : /w(\d+)_/; } catch { re = /w(\d+)_/; }
+  const curMatch = String(currentUrl ?? '').match(re);
+  const want = (curMatch ? Number(curMatch[1]) : 1) + 1;
+
+  const sels = (selector ?? '').toString().split(',').map(s => s.trim()).filter(Boolean)
+    .flatMap(s => [s, `${s} a`]);
+
+  for (const anchor of collectAnchorsWithAncestors(html)) {
+    if (sels.length && !sels.some(s => selectorMatchesAnchor(s, anchor.attrText, anchor.ancestorStack))) continue;
+    const href = decodeHtmlAttribute(parseTagAttrs(anchor.attrText).get('href') ?? '');
+    if (!href) continue;
+    const m = href.match(re);
+    if (m && Number(m[1]) === want) {
+      const resolved = resolvePageLink(href, currentUrl);
+      if (resolved) return resolved;
+    }
+  }
+  return null;
+}
+
+export function findNextPageLink(html, baseUrl, paginationSelector, opts = {}) {
+  // Numbered engines (no next-anchor) opt in via the profile — handle first.
+  if (opts.numbered) {
+    const n = nextNumberedPageUrl(html, baseUrl, { selector: paginationSelector, numberRe: opts.numberRe });
+    if (n) return n;
+  }
   const selectors = (paginationSelector ?? '')
     .toString()
     .split(',')
@@ -845,6 +951,21 @@ export function findNextPageLink(html, baseUrl, paginationSelector) {
     /<a\b[^>]*rel=(?:"|')next(?:"|')[^>]*href=(?:"|')([^"']+)(?:"|')/i,
     /<a\b[^>]*href=(?:"|')([^"']+)(?:"|')[^>]*rel=(?:"|')next(?:"|')/i,
     /<li\b[^>]*class=(?:"|')[^"']*\bnext\b[^"']*(?:"|')[^>]*>\s*<a\b[^>]*href=(?:"|')([^"']+)(?:"|')/i,
+    // <link rel="next"> in the document head. WoltLab (RenaultForum.net,
+    // PeugeotTalk.de, MeinID) publishes listing/thread pagination ONLY here —
+    // its body next-button carries no matchable class/rel, so sections were
+    // marked "done" after page 1 (false "archive complete", review 2026-07-02).
+    /<link\b[^>]*rel=(?:"|')next(?:"|')[^>]*href=(?:"|')([^"']+)(?:"|')/i,
+    /<link\b[^>]*href=(?:"|')([^"']+)(?:"|')[^>]*rel=(?:"|')next(?:"|')/i,
+    // SMF (PeugeotClub Slovakia): the next-page link is the navPages anchor
+    // whose text is the » glyph. Numbered navPages anchors must NOT match —
+    // only the explicit »/&raquo; one.
+    /<a\b[^>]*class=(?:"|')[^"']*\bnavPages\b[^"']*(?:"|')[^>]*href=(?:"|')([^"']+)(?:"|')[^>]*>\s*(?:»|&raquo;|&#187;)/i,
+    // Weakest heuristic LAST: a next button marked only by its text label
+    // (kia-club.org phpBB skin: <a href="...&start=25" class="right-box">Další).
+    // The href must look like pagination (start=/offset=/page…) so ordinary
+    // "next topic"-style links can never match.
+    /<a\b[^>]*href=(?:"|')([^"']*(?:[?&;](?:start|offset)=\d|[?&;]page(?:no)?=\d|\/page\d|page\d+\.html)[^"']*)(?:"|')[^>]*>(?:\s|&nbsp;|<span[^>]*>|<i[^>]*>|<b[^>]*>)*(?:Další|Ďalej|Ďalšia|Weiter|Nächste|Next|Suivant|›|»|&raquo;|&#187;|&rsaquo;)/i,
   ];
 
   for (const p of patterns) {
