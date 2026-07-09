@@ -39,6 +39,7 @@ import { AgentState } from './state.mjs';
 import { isStoppingError } from './quota.mjs';
 import { QUALITY_BAR } from './quality-bar.mjs';
 import { promptField, promptList } from './prompt-sanitize.mjs';
+import { caseAnchorBlock, windowThread, JUDGE_FULL_CAP } from './judge-context.mjs';
 
 // Re-export so existing importers (tests, precision-auditor) keep one source of truth.
 export { QUALITY_BAR };
@@ -64,7 +65,7 @@ const ALERT_RATE    = floatEnv('RECALL_AUDIT_ALERT_RATE', 0.30); // flag if ≥3
 const ALERT_MIN     = intEnv('RECALL_AUDIT_ALERT_MIN', 3);  // …and at least this many (small-sample guard)
 const AUDIT_TIMEOUT_MS = 90_000;
 const AUDIT_MAX_TOKENS = 300;
-const MAX_THREAD_CHARS = 60_000; // recall-audit only needs enough context to judge
+const MAX_THREAD_CHARS = JUDGE_FULL_CAP; // backstop; windowThread (call site) does the real capping
 
 const META_KEY = 'recall_audit_last_date';
 const ALERT_FILE = join(__dirname, 'recall-alert.txt');
@@ -122,7 +123,7 @@ export function shouldAlert(results, { rate = ALERT_RATE, min = ALERT_MIN } = {}
 }
 
 /** Build the independent re-check prompt. */
-export function buildAuditPrompt(threadText, caseObj, verifierReason) {
+export function buildAuditPrompt(threadText, caseObj, verifierReason, anchorBlock = '') {
   const text = (threadText || '').length > MAX_THREAD_CHARS
     ? threadText.slice(0, MAX_THREAD_CHARS) + '\n[...truncated...]'
     : (threadText || '');
@@ -132,7 +133,7 @@ export function buildAuditPrompt(threadText, caseObj, verifierReason) {
   return `An automated verifier REJECTED the extracted case below (so it will NOT enter the database). Independently decide whether that rejection was a mistake — i.e. the case actually meets the quality bar and a useful repair case was lost.
 
 ${QUALITY_BAR} IMPORTANT: only mark wrongly_rejected=true if the case clearly meets ALL of (a)-(e); if it fails (d) or (e), the rejection was CORRECT.
-
+${anchorBlock ? `\n${anchorBlock}\n` : ''}
 VERIFIER'S STATED REJECT REASON: ${verifierReason || '(none)'}
 
 EXTRACTED CASE:
@@ -222,8 +223,12 @@ async function main() {
         verifierReason,
       };
       if (!thread?.thread_text) { results.push({ ...base, errored: true, reason: 'no thread text' }); continue; }
+      const { text: windowed } = windowThread(thread.thread_text, {
+        caseAuthor: payload.case_author, faultPostNumbers: payload.fault_post_numbers,
+        resolutionPostNumbers: payload.resolution_post_numbers, confirmationPostNumber: payload.confirmation_post_number,
+      });
       try {
-        const raw = await runLlm('recall-audit', buildAuditPrompt(thread.thread_text, payload, verifierReason), {
+        const raw = await runLlm('recall-audit', buildAuditPrompt(windowed, payload, verifierReason, caseAnchorBlock(payload)), {
           timeoutMs: AUDIT_TIMEOUT_MS, maxTokens: AUDIT_MAX_TOKENS, temperature: 0,
         });
         results.push({ ...base, ...parseAuditVerdict(raw) });

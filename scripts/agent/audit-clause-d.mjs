@@ -26,6 +26,7 @@ import { dirname, join } from 'node:path';
 import { writeFileSync, readFileSync, mkdirSync } from 'node:fs';
 import { deepseekChat } from './llm.mjs';
 import { promptField, promptList } from './prompt-sanitize.mjs';
+import { caseAnchorBlock, windowThread, JUDGE_FULL_CAP } from './judge-context.mjs';
 import {
   fetchOpenReviewQueueRows, setLiveCaseStatusByLocalId, deleteReviewQueueRow,
 } from './supabase-utils.mjs';
@@ -37,7 +38,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL || 'https://nmvjthfezyjcwuzphiuu.s
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
 const H = { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` };
 
-const MAX_THREAD_CHARS = 60_000;
+const MAX_THREAD_CHARS = JUDGE_FULL_CAP;  // backstop; windowThread does the real capping
 const MIN_QUOTE_CHARS = 8;
 
 const APPLY = process.argv.includes('--apply');
@@ -47,12 +48,12 @@ const MAX = (() => { const i = process.argv.indexOf('--max'); return i === -1 ? 
 function norm(s) { return (s ?? '').toString().toLowerCase().replace(/\s+/g, ' ').trim(); }
 function snippet(s, n = 90) { return norm(s).slice(0, n); }
 
-function buildPrompt(threadText, c) {
+function buildPrompt(threadText, c, anchorBlock = '') {
   const text = (threadText || '').length > MAX_THREAD_CHARS ? threadText.slice(0, MAX_THREAD_CHARS) + '\n[...]' : (threadText || '');
   return `A repair case was extracted from the forum thread below and is awaiting approval. It was held back because an automated judge could not confirm the repair actually FIXED the fault. Re-check ONLY that question against the thread.
 
 The case is CONFIRMED only if the thread contains a clear statement — by the car's OWNER (the SAME user who reported the fault) — that AFTER this repair the original fault was GONE / the car worked / the problem was solved. A plan to try it, "I'll report back", ordering a part, or an ambiguous outcome is NOT a confirmation.
-
+${anchorBlock ? `\n${anchorBlock}\n` : ''}
 CASE:
   Vehicle: ${promptField(c.vehicle_brand || '?', 80)} ${promptField(c.vehicle_model || '', 80)}
   Symptoms: ${promptList(c.symptoms)}
@@ -106,14 +107,19 @@ async function run() {
     const localId = dRows[i].case_local_id;
     const live = await liveCaseByLocalId(localId);
     if (!live || live.status !== 'pending') { continue; } // already decided elsewhere
-    const agentCase = db.prepare(`SELECT thread_id FROM cases WHERE id=?`).get(localId);
+    const agentCase = db.prepare(`SELECT thread_id, payload_json FROM cases WHERE id=?`).get(localId);
     const thread = agentCase?.thread_id ? db.prepare(`SELECT thread_text FROM threads WHERE id=?`).get(agentCase.thread_id) : null;
     const threadText = thread?.thread_text || '';
     if (threadText.trim().length < 200) { noThread++; continue; }
+    let payload = {}; try { payload = JSON.parse(agentCase?.payload_json || '{}'); } catch { /* keep {} */ }
+    const { text: windowed } = windowThread(threadText, {
+      caseAuthor: payload.case_author, faultPostNumbers: payload.fault_post_numbers,
+      resolutionPostNumbers: payload.resolution_post_numbers, confirmationPostNumber: payload.confirmation_post_number,
+    });
 
     let v;
     try {
-      const raw = await deepseekChat({ apiKey: process.env.DEEPSEEK_API_KEY, prompt: buildPrompt(threadText, live), maxTokens: 400, temperature: 0 });
+      const raw = await deepseekChat({ apiKey: process.env.DEEPSEEK_API_KEY, prompt: buildPrompt(windowed, live, caseAnchorBlock(payload)), maxTokens: 400, temperature: 0 });
       v = parseVerdict(raw);
     } catch (e) { errors++; console.error(`  [${i + 1}/${dRows.length}] ${localId.slice(0, 10)} error: ${e.message}`); continue; }
 

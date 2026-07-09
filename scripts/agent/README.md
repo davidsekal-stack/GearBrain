@@ -220,6 +220,30 @@ Key design points (see the prompt in `verify.mjs`):
   post by the case author explicitly saying the fault is gone. Another user's
   own-car success is corroboration, not confirmation; a repair described or paid
   for with no stated outcome is not confirmed.
+- **Owner-anchor propagation + post-aware windowing (2026-07-08).** A hand review of
+  the whole ~238-case review queue found the intake **triage** over-flagged clause (d):
+  unlike `verify.mjs` (anchored in 2026-06), `triage.mjs` / `precision-auditor.mjs` /
+  `recall-watchdog.mjs` did **not** tell the model who the case OWNER is (`case_author`)
+  or which posts are cited, so on multi-participant threads it conflated the thread
+  STARTER with the owner and could not find the owner's confirmation. They also
+  head-truncated the thread at 60 k, dropping the owner's (usually LATE) confirmation.
+  Fix: a shared [`judge-context.mjs`](/C:/GB/scripts/agent/judge-context.mjs) exporting
+  `caseAnchorBlock(payload)` (the CASE AUTHOR + FAULT/RESOLUTION POSTS anchor, mirroring
+  verify; sourced from the local `agent.db` payload) and `windowThread()` (post-aware:
+  always keeps every case-author post — incl. their LAST word — + the cited posts + the
+  original complaint, fills from both ends, elides only the uninvolved middle, and is
+  hardened against a forged in-band `POST n` header). Both are injected into triage,
+  precision-auditor, recall-watchdog and `audit-clause-d.mjs`; the 60 k cap is raised to
+  150 k (`JUDGE_FULL_CAP`, matching verify). `windowThread` GUARANTEES output ≤ cap and
+  returns `coverageComplete` — triage **never auto-approves** unless the whole window was
+  seen (a thread too long to verify in full goes to the human, never silently approved).
+  Covered by [`tests/agent-judge-context.test.js`](/C:/GB/tests/agent-judge-context.test.js).
+  Gold-set check against 238 hand-labelled verdicts (partial, 130): **95 % precision**
+  (rejects correctly withheld) at **~55 % recall** (good cases now auto-cleared instead
+  of all going to the human). Residual: the cheap haiku judge can still miss a
+  confirmed-then-*retracted* case in a long thread — the precision-auditor (now also
+  anchored) is the post-hoc net; routing the triage auto-approve judge to
+  `claude:sonnet` (`AGENT_LLM_TRIAGE`) is the recommended hardening.
 
 Validated against a 67-case live regression (the imports from the prior night):
 caught **8/8** known-bad cases, **0** false-rejects on 50 confirmed-good cases,

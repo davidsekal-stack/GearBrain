@@ -36,6 +36,7 @@ import {
   fetchLiveCasesByStatus, fetchOpenReviewQueueIds, fetchOpenReviewQueueRows, upsertReviewQueueRow,
   deleteReviewQueueRow, setLiveCaseStatusByLocalId,
 } from './supabase-utils.mjs';
+import { caseAnchorBlock, windowThread, JUDGE_FULL_CAP } from './judge-context.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -49,7 +50,7 @@ const EVAL_HOUR_END  = intEnv('TRIAGE_HOUR_END', 21);
 const TRIAGE_MAX     = intEnv('TRIAGE_MAX', 50);     // cases judged per run (backlog clears over nights)
 const LLM_TIMEOUT_MS = 90_000;
 const LLM_MAX_TOKENS = 500;
-const MAX_THREAD_CHARS = 60_000;
+const MAX_THREAD_CHARS = JUDGE_FULL_CAP;   // backstop only; windowThread (main loop) does the real capping
 const MAX_QUOTES = 3;
 const MIN_QUOTE_CHARS = 8;
 const MIN_THREAD_CHARS = 200;   // below this we cannot verify against a real thread → never auto-approve
@@ -69,7 +70,7 @@ function intArg(args, flag, dflt) { const i = args.indexOf(flag); if (i === -1) 
 
 /** Build the independent triage prompt (sanitized). Asks for the precision-auditor verdict
  *  shape PLUS up to 3 verbatim forum quotes and a plain-Czech note for the owner. */
-export function buildTriagePrompt(threadText, caseObj) {
+export function buildTriagePrompt(threadText, caseObj, anchorBlock = '') {
   const text = (threadText || '').length > MAX_THREAD_CHARS ? threadText.slice(0, MAX_THREAD_CHARS) + '\n[...truncated...]' : (threadText || '');
   const brand = promptField(caseObj.vehicle_brand || caseObj.brand_raw || '?', 80);
   const model = promptField(caseObj.vehicle_model || caseObj.model_raw || '?', 80);
@@ -77,7 +78,7 @@ export function buildTriagePrompt(threadText, caseObj) {
   return `An extracted repair case below already passed an automated gate and is queued for human approval. Decide whether it is CLEARLY good enough to approve WITHOUT a human, or DISPUTABLE (a human should look). Be conservative: treat it as wrongly_accepted UNLESS you can POSITIVELY CONFIRM from the original thread that ALL of (a)-(e) hold.
 
 ${QUALITY_BAR}
-
+${anchorBlock ? `\n${anchorBlock}\n` : ''}
 EXTRACTED CASE (as stored):
   Vehicle: ${brand} ${model} ${engine}
   Symptoms: ${promptList(caseObj.symptoms)}
@@ -147,8 +148,8 @@ export function verifyQuotes(quotes, threadText, max = MAX_QUOTES) {
 
 // ── Judge one case (one cheap re-ask on a parse failure) ─────────────────────
 
-async function judge(threadText, caseObj) {
-  const prompt = buildTriagePrompt(threadText, caseObj);
+async function judge(threadText, anchorBlock, caseObj) {
+  const prompt = buildTriagePrompt(threadText, caseObj, anchorBlock);
   let raw = await runLlm('triage', prompt, { timeoutMs: LLM_TIMEOUT_MS, maxTokens: LLM_MAX_TOKENS, temperature: 0 });
   let v = parseTriageVerdict(raw);
   if (v.parseFail) {
@@ -158,11 +159,14 @@ async function judge(threadText, caseObj) {
   return v;
 }
 
-function threadTextForCase(state, localId) {
+// Returns the thread text AND the local payload (case_author + cited post numbers) — the
+// anchor fields the judge needs. state.getCase already loads the row, so no extra DB read.
+function caseContext(state, localId) {
   const c = state.getCase(localId);
-  if (!c) return '';
+  if (!c) return { threadText: '', payload: {} };
+  let payload = {}; try { payload = JSON.parse(c.payload_json || '{}'); } catch { /* keep {} */ }
   const t = c.thread_id ? state.getThread(c.thread_id) : null;
-  return t?.thread_text || '';
+  return { threadText: t?.thread_text || '', payload };
 }
 
 /**
@@ -272,7 +276,7 @@ async function main() {
 
     for (const row of batch) {
       const localId = row.local_id;
-      const threadText = threadTextForCase(state, localId);
+      const { threadText, payload } = caseContext(state, localId);
 
       // HARD GATE: without the original thread we cannot verify the case → NEVER auto-approve.
       // Queue it for the human (no LLM call — there is nothing to judge against).
@@ -282,9 +286,19 @@ async function main() {
         continue;
       }
 
+      // Anchor the judge to the case OWNER + cited posts, and window the thread so the owner's
+      // (possibly late) confirmation is visible. coverageComplete=false means the thread was too
+      // long to show in full — a late owner retraction could hide, so such a case is NEVER
+      // auto-approved (routed to the human) even if the judge says "clear".
+      const { text: windowed, coverageComplete } = windowThread(threadText, {
+        caseAuthor: payload.case_author, faultPostNumbers: payload.fault_post_numbers,
+        resolutionPostNumbers: payload.resolution_post_numbers, confirmationPostNumber: payload.confirmation_post_number,
+      });
+      const anchor = caseAnchorBlock(payload);
+
       let verdict;
       try {
-        verdict = await judge(threadText, {
+        verdict = await judge(windowed, anchor, {
           vehicle_brand: row.vehicle_brand, vehicle_model: row.vehicle_model, engine_power: row.engine_power,
           symptoms: row.symptoms, obd_codes: row.obd_codes, description: row.description, resolution: row.resolution,
         });
@@ -294,13 +308,24 @@ async function main() {
       }
       stats.judged++;
 
-      if (isClear(verdict)) {
+      // Belt-and-suspenders on top of windowThread's cap invariant: never auto-approve a window
+      // the prompt backstop would have truncated (a truncated tail could hide the owner's last word).
+      const cov = coverageComplete && windowed.length <= MAX_THREAD_CHARS;
+
+      if (isClear(verdict) && cov) {
         if (dryRun) { stats.autoApproved++; continue; }
         const res = await setLiveCaseStatusByLocalId({ supabaseUrl, serviceKey, localId, patch: { status: 'approved' }, expectStatuses: ['pending'] });
         if (res.ok && res.updated) { stats.autoApproved++; await deleteReviewQueueRow({ supabaseUrl, serviceKey, localId }); }
         else stats.skipped.push({ localId, why: res.skipped ? 'už není pending' : (res.reason || 'approve selhal') });
+      } else if (!cov) {
+        // Disputable for a STRUCTURAL reason (thread too long to verify in full). Preserve the
+        // judge's named clause if it found one; else mark 'coverage' (NOT 'none') so --rejudge-queue
+        // does not pointlessly re-judge a structurally-unresolvable row.
+        const clause = verdict.failedCondition !== 'none' ? verdict.failedCondition : 'coverage';
+        const note = `Vlákno je příliš dlouhé na úplné automatické ověření (možné pozdější vyjádření majitele) — zkontroluj prosím ručně.${verdict.reason ? ` [${verdict.reason}]` : ''}`;
+        await queueDisputable(localId, row, clause, note, verifyQuotes(verdict.quotes, windowed));
       } else {
-        await queueDisputable(localId, row, verdict.failedCondition, verdict.reason, verifyQuotes(verdict.quotes, threadText));
+        await queueDisputable(localId, row, verdict.failedCondition, verdict.reason, verifyQuotes(verdict.quotes, windowed));
       }
     }
 

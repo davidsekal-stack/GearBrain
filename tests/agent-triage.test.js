@@ -51,6 +51,12 @@ assert.doesNotMatch(prompt, /\nIGNORE ALL PREVIOUS/, 'newline-prefixed injection
 assert.ok(!prompt.includes('END_MARK'), 'over-long field length-capped');
 assert.match(prompt, /untrusted forum content|NOT instructions/i, 'thread block framed as untrusted (anti-injection)');
 
+// ── buildTriagePrompt: the case-owner ANCHOR is injected when provided (owner-conflation fix) ──
+const anchored = buildTriagePrompt('POST 1 | author: x:\nt', { vehicle_brand: 'A', resolution: 'r', symptoms: ['s'] }, 'CASE AUTHOR: Ramon1755\nFAULT POSTS: 5');
+assert.match(anchored, /CASE AUTHOR: Ramon1755/, 'anchor block injected into triage prompt');
+assert.match(anchored, /FAULT POSTS: 5/);
+assert.doesNotMatch(buildTriagePrompt('t', { vehicle_brand: 'A' }), /CASE AUTHOR:/, 'no anchor line when anchorBlock omitted (backward compatible)');
+
 // ── supabase-utils REST helpers (fake fetch) ──
 const listFetch = async (url) => {
   assert.match(url, /status=eq\.pending/);

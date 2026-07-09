@@ -41,6 +41,9 @@ import { isStoppingError } from './quota.mjs';
 import { QUALITY_BAR } from './quality-bar.mjs';
 import { clampResolutionForImport, normalizeImportText } from './supabase-utils.mjs';
 import { promptField, promptList } from './prompt-sanitize.mjs';
+import { caseAnchorBlock, windowThread, JUDGE_FULL_CAP } from './judge-context.mjs';
+
+const PROMPT_VERSION = 2; // bump when the judging prompt changes; segments pre/post labels in the pool
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -79,7 +82,7 @@ const COVERAGE_CAP     = intEnv('PRECISION_COVERAGE_CAP', 500);
 const RESOLUTION_SHORT_CHARS = intEnv('PRECISION_RES_SHORT', 220);
 const AUDIT_TIMEOUT_MS = 90_000;
 const AUDIT_MAX_TOKENS = 300;
-const MAX_THREAD_CHARS = 60_000;
+const MAX_THREAD_CHARS = JUDGE_FULL_CAP;  // backstop; windowThread (judgeCase) does the real capping
 
 const META_KEY        = 'precision_audit_last_date';
 const META_AUDITED_IDS = 'precision_audited_ids';
@@ -143,7 +146,7 @@ export function parsePrecisionVerdict(raw) {
 /** Build the skeptical, clause-naming re-check prompt. For imported cases it shows the
  *  CLAMPED artifact actually stored in the DB (not the raw payload). All interpolated
  *  case fields are sanitized (whitespace-collapsed + length-capped) against injection. */
-export function buildPrecisionPrompt(threadText, caseObj, status) {
+export function buildPrecisionPrompt(threadText, caseObj, status, anchorBlock = '') {
   const text = (threadText || '').length > MAX_THREAD_CHARS
     ? threadText.slice(0, MAX_THREAD_CHARS) + '\n[...truncated...]'
     : (threadText || '');
@@ -158,7 +161,7 @@ export function buildPrecisionPrompt(threadText, caseObj, status) {
   return `An automated gate ACCEPTED the case below — it is either ALREADY in the live diagnostic database or queued to enter it, where a bad case corrupts real repair advice. Independently catch a MISTAKEN acceptance. Assume NOTHING the gate did is correct: treat the case as wrongly_accepted UNLESS you can POSITIVELY CONFIRM from the original thread that ALL of (a)-(e) hold.
 
 ${QUALITY_BAR}
-
+${anchorBlock ? `\n${anchorBlock}\n` : ''}
 EXTRACTED CASE (as accepted):
   Vehicle: ${brand} ${model} ${engine}
   Symptoms: ${promptList(caseObj.symptoms)}
@@ -293,8 +296,10 @@ function saveAuditedIds(state, ids) {
   state.setMeta(META_AUDITED_IDS, JSON.stringify(ids.slice(-COVERAGE_CAP)));
 }
 
-/** Trailing-window pooled rate from the labelled judgements (the marker's primary signal). */
-export function pooledStatsFrom(lines, today, days) {
+/** Trailing-window pooled rate from the labelled judgements (the marker's primary signal).
+ *  When `pv` is given, only labels stamped with that prompt version are counted, so a prompt
+ *  change (which shifts the base rate) does not mix regimes in the pooled/baseline comparison. */
+export function pooledStatsFrom(lines, today, days, pv = null) {
   const cutoff = addLocalDays(today, -days); // EXCLUSIVE lower bound → a true trailing `days`-day window
   let wrong = 0, judged = 0;
   for (const line of lines) {
@@ -302,6 +307,7 @@ export function pooledStatsFrom(lines, today, days) {
     if (!t) continue;
     try {
       const o = JSON.parse(t);
+      if (pv != null && o.pv !== pv) continue; // prompt-version consistency (pre-anchor labels have no pv)
       const d = o.date || '';
       if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) continue; // only well-formed local dates compare correctly as strings
       if (d > cutoff) { judged++; if (o.wrongly_accepted) wrong++; }
@@ -377,8 +383,16 @@ function writeReport({ today, windowDays, poolSize, results, decision, unparsed,
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function judgeCase(threadText, payload, status) {
+  // Anchor to the case owner + cited posts and window the thread so the owner's (possibly late)
+  // confirmation is visible — the same fix as triage/verify, so this net measures against the
+  // same evidence the gate should have used.
+  const { text: windowed } = windowThread(threadText, {
+    caseAuthor: payload.case_author, faultPostNumbers: payload.fault_post_numbers,
+    resolutionPostNumbers: payload.resolution_post_numbers, confirmationPostNumber: payload.confirmation_post_number,
+  });
+  const anchor = caseAnchorBlock(payload);
   // One cheap re-ask on a parse failure before counting it a coverage gap.
-  const prompt = buildPrecisionPrompt(threadText, payload, status);
+  const prompt = buildPrecisionPrompt(windowed, payload, status, anchor);
   let raw = await runLlm('coach-precision', prompt, { timeoutMs: AUDIT_TIMEOUT_MS, maxTokens: AUDIT_MAX_TOKENS, temperature: 0 });
   let verdict = parsePrecisionVerdict(raw);
   if (verdict.parseFail) {
@@ -454,12 +468,13 @@ async function main() {
       const lines = judgedRows.map(r => JSON.stringify({
         ts: now.toISOString(), date: today, case_id: r.id, status: r.status, forum_id: r.forum_id,
         slice: r.slice, wrongly_accepted: !!r.wronglyAccepted, confidence: r.confidence, failed_condition: r.failedCondition, reason: r.reason,
+        pv: PROMPT_VERSION,  // prompt-version stamp: lets later gold-set work segment pre/post-anchor labels
       }));
       appendFileSync(LABELS_FILE, lines.join('\n') + '\n', 'utf8');
     }
     const labelLines = readLabelLines(LABELS_FILE);
-    const pooled = pooledStatsFrom(labelLines, today, POOL_WINDOW_DAYS);
-    const baseline = pooledStatsFrom(labelLines, today, POOL_BASELINE_DAYS);
+    const pooled = pooledStatsFrom(labelLines, today, POOL_WINDOW_DAYS, PROMPT_VERSION);
+    const baseline = pooledStatsFrom(labelLines, today, POOL_BASELINE_DAYS, PROMPT_VERSION);
     const decision = shouldAlertPrecision(results, pooled, { baseline });
 
     console.log(`precision-auditor: judged ${decision.judged}, wrongly-accepted ${decision.wrong} (${(decision.ratio * 100).toFixed(0)}%), pooled ${decision.pooledWrong}/${decision.pooledJudged} (${(decision.pooledRatio * 100).toFixed(0)}%), baseline ${(decision.baselineRatio * 100).toFixed(0)}% over ${POOL_BASELINE_DAYS}d, unparsed ${unparsed} → alert=${decision.alert}${decision.alert ? ` [${decision.severeHit ? 'severe' : ''}${decision.regressionHit ? 'regression' : ''}${decision.clusterHit ? 'cluster' : ''}]` : ''}`);
