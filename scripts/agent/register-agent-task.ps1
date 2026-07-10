@@ -12,9 +12,12 @@ param(
   # competes with the owner's daytime Claude subscription usage. When set, the
   # task fires daily at -NightlyStart and repeats every -IntervalMinutes for
   # -NightlyWindowHours, instead of running 24/7.
+  # Default window 17:00–02:00 local: keeps the DeepSeek-billed verify step in DeepSeek
+  # OFF-PEAK hours (peak = 01–04 & 06–10 UTC) year-round AND outside working hours 06–17.
+  # Keep -NightlyStart/-NightlyWindowHours in sync with run-agent-batch.ps1 NightStart/EndHour.
   [switch]$Nightly,
-  [string]$NightlyStart = '23:00',
-  [int]$NightlyWindowHours = 7
+  [string]$NightlyStart = '17:00',
+  [int]$NightlyWindowHours = 9
 )
 
 Set-StrictMode -Version Latest

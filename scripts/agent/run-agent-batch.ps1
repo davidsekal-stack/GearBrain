@@ -5,11 +5,15 @@ param(
   [string]$Phase,
   [string]$NodePath,
   [string]$LogDir,
-  # Night crawl window bounds — keep in sync with the trigger registered by
+  # Night crawl window bounds (LOCAL time) — keep in sync with the trigger registered by
   # register-agent-task.ps1 (-Nightly). Used only to compute the orchestrator's
   # clean-stop deadline; runs started OUTSIDE the window get no deadline.
-  [int]$NightStartHour = 22,
-  [int]$NightEndHour = 6,
+  # Window = 17:00–02:00 local: chosen so the DeepSeek-billed step (verify.mjs) always runs
+  # in DeepSeek OFF-PEAK hours (peak = 01–04 & 06–10 UTC) in BOTH CET and CEST, AND entirely
+  # outside the owner's working hours 06:00–17:00. (17:00–02:00 local → 15:00–00:00 UTC in
+  # summer / 16:00–01:00 UTC in winter, both clear of the peak bands.)
+  [int]$NightStartHour = 17,
+  [int]$NightEndHour = 2,
   [int]$DeadlineMarginMinutes = 10
 )
 
