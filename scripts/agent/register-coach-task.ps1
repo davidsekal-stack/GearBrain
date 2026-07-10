@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [string]$TaskName = 'DriveCodexDailyCoach',
-  [string]$At = '06:20',          # after the 22:00–06:00 crawl window closes
+  [string]$At = '04:00',          # after the 17:00–02:00 crawl window closes, before work hours (06:00)
   [string]$NodePath,
   [string]$LogDir,
   [switch]$RunNow
@@ -9,8 +9,11 @@ param(
 
 # Registers the once-daily post-night runner (recall watchdog + daily coach).
 # Separate from DriveCodexAgentBatch (the 5-min crawl batch) because the coach must
-# run AFTER the nightly window, and no crawl batch fires between 06:00 and 21:00.
-# StartWhenAvailable so a machine asleep at 06:20 catches up on next wake.
+# run AFTER the nightly crawl window (17:00–02:00) closes. Runs at 04:00 — after the
+# crawl, before working hours (06:00). NOTE: the coach steps self-gate to a morning
+# window (default 06:00 start); .env.local lowers TRIAGE_HOUR/PRECISION_AUDIT_HOUR/
+# RECALL_AUDIT_HOUR/ALERT_AGENT_HOUR/RECAL_GUARDED_HOUR/COACH_HOUR to 4 so they run at 04:00.
+# StartWhenAvailable so a machine asleep at 04:00 catches up on next wake.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
