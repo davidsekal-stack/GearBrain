@@ -110,6 +110,31 @@ The crawl pipeline is:
 8. collapse same-thread duplicates (routed LLM, default Claude Haiku) — see below
 9. store valid cases in SQLite
 
+**Fetch escalation (anti-bot).** Every page fetch goes through `fetchHtml`
+([`fetch-utils.mjs`](/C:/GB/scripts/agent/fetch-utils.mjs)) in escalating tiers,
+cheapest first, each only tried when the previous one hits a block (403/406/503)
+or a WAF challenge page:
+
+1. **plain `fetch`** — static Chrome UA; handles the vast majority of forums.
+2. **got-scraping** (fingerprinted HTTP, no browser) — synthesizes a realistic
+   Chrome TLS/JA3 + header fingerprint. Defeats TLS/header-fingerprint WAFs
+   (e.g. VerticalScope: audizine.com 403 → 200) without paying for a browser.
+   Ships with crawlee (no extra dep). **Opt-in** (default off, so the nightly run
+   is unchanged until you flip it): enable with `AGENT_ENABLE_GOTSCRAPING=1`.
+3. **system-Chrome `--dump-dom`** — real headless browser for JS-rendered shells.
+4. **Crawlee/Playwright** — fingerprinted (optionally residential-proxied,
+   `AGENT_PROXY_URL`) browser for POW/JS challenges the DOM dump can't solve.
+
+Not IP-based blocks: a proxy does **not** help sites that 403 every IP (verified
+2026-07-13 on dieselpower.cz / forum.mazdaklub.eu). **robots.txt** is ignored by
+default; set `AGENT_ROBOTS_MODE=log` to record which URLs it *would* disallow, or
+`=enforce` to actually skip them (can cut coverage sharply — measure with `log`
+first). The robots lookup is bounded (5s timeout, one fetch per origin, via
+`AGENT_PROXY_URL` if set). **`enforce` is not yet wired into caller error
+handling** — a disallowed URL throws a fetch error that the orchestrator/calibrator
+treat as a real failure (terminal `error` status, can trip the forum breaker), so
+prefer `log` until that skip path exists.
+
 **Same-thread dedupe** ([`dedup-thread-cases.mjs`](/C:/GB/scripts/agent/dedup-thread-cases.mjs)):
 one forum thread is one discussion. When several members report the SAME fault
 fixed the SAME way (e.g. three owners each fitting an aftermarket horn), the
@@ -496,6 +521,10 @@ Fill `scripts/agent/.env.local` (copy from
 Once filled, everything is autonomous: scheduled runs (`run-agent-batch.ps1`) load
 it, migrations run via `apply-migrations.ps1`, and the online registry + import
 activate. Without it the agent still runs (local-only registry, no import).
+
+Optional anti-bot / politeness knobs (all off/unset by default, documented in the
+template): `AGENT_ENABLE_GOTSCRAPING`, `AGENT_PROXY_URL`, `AGENT_DISABLE_CRAWLEE`,
+`AGENT_ROBOTS_MODE` — see the **Fetch escalation** note under Phase 3.
 
 ## How I Would Operate It
 

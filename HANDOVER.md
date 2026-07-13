@@ -138,6 +138,29 @@ Pozor:
 
 ## Co bylo uděláno naposledy
 
+### 0. Crawl agent — fetch vrstva: got-scraping tier + robots.txt (2026-07-13, LOKÁLNĚ, nepushnuto)
+
+**Kontext:** Test Apify residential proxy ukázal, že IP-blokace u dieselpower.cz /
+forum.mazdaklub.eu proxy nevyřeší (403 na každé IP). Placený Apify se tedy zatím
+nekupuje. Místo toho dvě vylepšení fetch kaskády ve
+[`fetch-utils.mjs`](scripts/agent/fetch-utils.mjs), **bez nové závislosti** (obojí
+už je v `crawlee`):
+
+- **got-scraping tier** — fingerprintovaný HTTP request (TLS/JA3 + pořadí hlaviček)
+  jako levný mezistupeň *před* prohlížečem v každé blokované větvi (403/406, 503,
+  challenge). Sdílený helper `escalateBlockedFetch` (got-scraping → system-Chrome →
+  Crawlee). Ověřeno: audizine.com 403 → 200 bez prohlížeče. **Opt-in**, výchozí
+  vypnuto: `AGENT_ENABLE_GOTSCRAPING=1`.
+- **robots.txt** — `AGENT_ROBOTS_MODE=off|log|enforce` (výchozí `off`). Lookup je
+  ohraničený (5s timeout, 1 fetch/origin přes cache promisu, přes `AGENT_PROXY_URL`).
+  **Známé omezení:** `enforce` vyhazuje fetch chybu, kterou orchestrátor/kalibrace
+  zatím neodliší od reálného selhání (→ status `error`, může spustit pojistku fóra);
+  produkčně používat `log`, dokud se nedoplní caller-side skip. Pro proxy platí:
+  IP-blokace neřeší (ověřeno 13.7.).
+
+Výchozí hodnoty = noční běh beze změny. Testy: `tests/agent-robots-gotscraping.test.js`,
+celá `test:agent` sada zelená. Nepushnuto (čeká na souhlas majitele se zapnutím).
+
 ### 0. Crawl agent — věkový filtr vláken („netěžit mladší než rok") + defer/revisit (2026-06-25, LOKÁLNĚ, větev `feat/crawler-thread-age-defer`)
 
 **Problém (nápad majitele):** crawler, který vlákno otevře, nenajde řešení a označí `discarded`,

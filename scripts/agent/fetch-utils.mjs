@@ -73,6 +73,17 @@ export function isLikelyBrowserErrorHtml(value) {
   return BROWSER_ERROR_PATTERNS.some(pattern => pattern.test(text));
 }
 
+// A fetched response is usable HTML only if it's a 2xx real HTML document that
+// is neither a WAF challenge nor a browser error page. Used by the got-scraping
+// tier to judge its own response. (The plain-fetch path keeps its existing
+// inline checks; this is not wired into it.)
+export function shouldAcceptFetchedHtml(statusCode, html) {
+  if (typeof statusCode === 'number' && (statusCode < 200 || statusCode >= 300)) return false;
+  if (!isHtmlDocument(html)) return false;
+  if (isLikelyChallengeHtml(html) || isLikelyBrowserErrorHtml(html)) return false;
+  return true;
+}
+
 function resolveOrigin(url) {
   try {
     const parsed = new URL(url);
@@ -177,6 +188,156 @@ async function tryCrawleeFallback(url, options = {}) {
   }
 }
 
+// Fingerprinted HTTP fetch (got-scraping): mimics a real browser's TLS/JA3 and
+// header ordering WITHOUT launching a browser. Many WAFs (VerticalScope's
+// 403/406, some Cloudflare edges) block on TLS/header fingerprint rather than
+// IP reputation, and fall for this — letting us skip the far slower
+// system-Chrome and Crawlee tiers. got-scraping ships transitively with
+// crawlee, so this adds no dependency. Lazy-imported to keep the happy path
+// light. OPT-IN (default off) so it never changes the unattended nightly run
+// without a deliberate switch — enable with AGENT_ENABLE_GOTSCRAPING=1.
+// NOTE: this does NOT defeat IP-based blocks (verified 2026-07-13: dieselpower.cz
+// and forum.mazdaklub.eu still 403 here — those need a real clean IP, if anything).
+let gotScrapingImpl; // undefined = not tried, null = unavailable
+async function loadGotScraping() {
+  if (gotScrapingImpl === undefined) {
+    try {
+      ({ gotScraping: gotScrapingImpl } = await import('got-scraping'));
+      gotScrapingImpl = gotScrapingImpl ?? null;
+    } catch {
+      gotScrapingImpl = null;
+    }
+  }
+  return gotScrapingImpl;
+}
+
+async function tryGotScrapingFallback(url, options = {}) {
+  if (process.env.AGENT_ENABLE_GOTSCRAPING !== '1') {
+    return { html: null, error: new Error('got-scraping fallback not enabled') };
+  }
+  try {
+    const gotScraping = await loadGotScraping();
+    if (!gotScraping) return { html: null, error: new Error('got-scraping unavailable') };
+    const headers = {};
+    if (options.cookie) headers.Cookie = options.cookie;
+    if (options.referer) headers.Referer = options.referer;
+    const res = await gotScraping({
+      url,
+      timeout: { request: options.timeoutMs ?? 30_000 },
+      retry: { limit: 0 },
+      throwHttpErrors: false,
+      followRedirect: true,
+      headers,
+      // Let got-scraping synthesize a realistic desktop-Chrome fingerprint
+      // (TLS + header order + sec-ch-ua) rather than our static UA string.
+      headerGeneratorOptions: {
+        browsers: [{ name: 'chrome', minVersion: 120 }],
+        operatingSystems: ['windows'],
+        devices: ['desktop'],
+      },
+    });
+    const body = typeof res.body === 'string' ? res.body : '';
+    if (!shouldAcceptFetchedHtml(res.statusCode, body)) {
+      return { html: null, error: new Error(`got-scraping received HTTP ${res.statusCode}`) };
+    }
+    return { html: body, error: null };
+  } catch (err) {
+    return { html: null, error: err };
+  }
+}
+
+// Ordered anti-bot escalation, cheapest first: fingerprinted HTTP (got-scraping)
+// → system-Chrome DOM dump → Crawlee/Playwright. Returns the first usable HTML,
+// or { html: null, crawleeError } if every tier failed (crawleeError carries the
+// last tier's detail for the caller's message). Callers decide what to throw, so
+// the three block branches share ONE ordering instead of three copies.
+async function escalateBlockedFetch(url, options = {}) {
+  const { html: gotHtml } = await tryGotScrapingFallback(url, options);
+  if (gotHtml) return { html: gotHtml, crawleeError: null };
+  const { html: browserHtml } = await tryBrowserFallback(url, options);
+  if (browserHtml) return { html: browserHtml, crawleeError: null };
+  const { html: crawleeHtml, error: crawleeError } = await tryCrawleeFallback(url, options);
+  return { html: crawleeHtml || null, crawleeError: crawleeHtml ? null : crawleeError };
+}
+
+// ── robots.txt politeness ──────────────────────────────────────────────────
+// OFF by default: the nightly crawl behaves exactly as before unless opted in.
+//   AGENT_ROBOTS_MODE=log      → fetch robots.txt, LOG disallowed URLs, still crawl
+//   AGENT_ROBOTS_MODE=enforce  → throw on URLs that robots.txt disallows
+// Many forums disallow bots broadly, so 'enforce' can sharply cut coverage —
+// run 'log' first to measure the impact before turning on enforcement.
+// CAVEAT: 'enforce' throws a plain fetch error; callers (orchestrator/calibrate)
+// do NOT yet distinguish a robots skip from a real fetch failure, so a disallowed
+// thread lands as status 'error' and a fully-disallowed forum can trip the
+// failure circuit breaker. 'log' is the recommended/production-safe mode until
+// caller-side skip handling is wired up.
+export function resolveRobotsMode(env = process.env) {
+  const raw = (env.AGENT_ROBOTS_MODE ?? '').trim().toLowerCase();
+  if (raw === 'log' || raw === 'advisory') return 'log';
+  if (raw === 'enforce' || raw === '1' || raw === 'true') return 'enforce';
+  return 'off';
+}
+
+// origin -> Promise<RobotsTxtFile | null>. Caching the PROMISE (not the resolved
+// value) dedupes concurrent first-hits to the same origin into ONE robots.txt
+// fetch. A resolved null means the load failed and is treated as allow-all.
+const robotsCache = new Map();
+
+export function __resetRobotsCacheForTests() {
+  robotsCache.clear();
+}
+
+function loadRobotsForOrigin(origin) {
+  if (!robotsCache.has(origin)) {
+    const loading = (async () => {
+      try {
+        const { RobotsTxtFile } = await import('crawlee');
+        // Bound the lookup (crawlee otherwise inherits got-scraping's 60s
+        // default, stalling the crawl on a slow /robots.txt), and use the same
+        // proxy as the Crawlee tier so the decision matches our crawl identity.
+        return await RobotsTxtFile.find(origin, process.env.AGENT_PROXY_URL, { timeoutMillis: 5_000 });
+      } catch {
+        return null; // fail open: never let robots.txt loading break a crawl
+      }
+    })();
+    robotsCache.set(origin, loading);
+  }
+  return robotsCache.get(origin);
+}
+
+// Pure, network-free core (parses robots.txt text directly) so the allow/deny
+// logic is unit-testable without hitting the network.
+export async function robotsTextAllows(robotsText, url) {
+  try {
+    const { RobotsTxtFile } = await import('crawlee');
+    const origin = new URL(url).origin;
+    const parsed = await RobotsTxtFile.from(`${origin}/robots.txt`, robotsText);
+    return parsed.isAllowed(url);
+  } catch {
+    return true; // unparseable robots.txt → don't block
+  }
+}
+
+export async function checkRobots(url, { mode } = {}) {
+  const resolved = mode || resolveRobotsMode();
+  if (resolved === 'off') return { allowed: true, mode: 'off' };
+  let origin;
+  try {
+    origin = new URL(url).origin;
+  } catch {
+    return { allowed: true, mode: resolved };
+  }
+  const robots = await loadRobotsForOrigin(origin);
+  if (!robots) return { allowed: true, mode: resolved }; // fail open
+  let allowed = true;
+  try {
+    allowed = robots.isAllowed(url);
+  } catch {
+    allowed = true;
+  }
+  return { allowed, mode: resolved };
+}
+
 async function renderWithExecutable(executable, url, options = {}) {
   const profileDir = await mkdtemp(join(tmpdir(), 'agent-browser-'));
   const targetTimeoutMs = options.browserTimeoutMs ?? 30_000;
@@ -238,6 +399,22 @@ export async function fetchHtml(url, options = {}) {
   if (options.cookie) headers.Cookie = options.cookie;
   if (options.referer) headers.Referer = options.referer;
 
+  // Politeness: consult robots.txt when enabled (default OFF → no change).
+  const robotsMode = resolveRobotsMode();
+  if (robotsMode !== 'off') {
+    const { allowed } = await checkRobots(url, { mode: robotsMode });
+    if (!allowed) {
+      if (robotsMode === 'enforce') {
+        const err = new Error(`robots.txt disallows ${url}`);
+        err.nonRetryable = true;
+        err.robotsBlocked = true;
+        throw err;
+      }
+      // advisory 'log' mode: record what enforcement WOULD skip, then proceed.
+      console.warn(`[robots:advisory] robots.txt would disallow (still fetching): ${url}`);
+    }
+  }
+
   // Force the headless-browser render (used as a retry when a plain fetch
   // returns a JS-rendered shell with no parseable posts).
   if (options.forceBrowser) {
@@ -264,12 +441,10 @@ export async function fetchHtml(url, options = {}) {
 
       if (!res.ok) {
         if (options.allowBrowserFallback !== false && BROWSER_BLOCK_STATUSES.has(res.status)) {
-          const { html: browserHtml } = await tryBrowserFallback(url, options);
-          if (browserHtml) return browserHtml;
-          // Escalate to the fingerprinted/proxied Crawlee browser — defeats
-          // VerticalScope-style WAFs (403/406) that the system-Chrome dump can't.
-          const { html: crawleeHtml, error: crawleeError } = await tryCrawleeFallback(url, options);
-          if (crawleeHtml) return crawleeHtml;
+          // Escalate through the anti-bot tiers (got-scraping → browser → Crawlee),
+          // which defeat VerticalScope-style WAFs the plain fetch can't.
+          const { html: fallbackHtml, crawleeError } = await escalateBlockedFetch(url, options);
+          if (fallbackHtml) return fallbackHtml;
           const fallbackDetail = crawleeError ? `; anti-bot fallback failed: ${crawleeError.message}` : '';
           const err = new Error(`HTTP ${res.status} fetching ${url}${fallbackDetail}`);
           err.nonRetryable = true;
@@ -285,10 +460,8 @@ export async function fetchHtml(url, options = {}) {
         // outage — once retries are exhausted, give the browser fallback a shot
         // before failing (a genuine outage just fails there too, as before).
         if (options.allowBrowserFallback !== false && res.status === 503) {
-          const { html: browserHtml } = await tryBrowserFallback(url, options);
-          if (browserHtml) return browserHtml;
-          const { html: crawleeHtml } = await tryCrawleeFallback(url, options);
-          if (crawleeHtml) return crawleeHtml;
+          const { html: fallbackHtml } = await escalateBlockedFetch(url, options);
+          if (fallbackHtml) return fallbackHtml;
         }
 
         throw new Error(`HTTP ${res.status} fetching ${url}`);
@@ -296,10 +469,8 @@ export async function fetchHtml(url, options = {}) {
 
       const html = await res.text();
       if (options.allowBrowserFallback !== false && isLikelyChallengeHtml(html)) {
-        const { html: browserHtml } = await tryBrowserFallback(url, options);
-        if (browserHtml) return browserHtml;
-        const { html: crawleeHtml, error: crawleeError } = await tryCrawleeFallback(url, options);
-        if (crawleeHtml) return crawleeHtml;
+        const { html: fallbackHtml, crawleeError } = await escalateBlockedFetch(url, options);
+        if (fallbackHtml) return fallbackHtml;
         const fallbackDetail = crawleeError ? `: ${crawleeError.message}` : '';
         const err = new Error(`Browser challenge fallback failed for ${url}${fallbackDetail}`);
         err.nonRetryable = true;
