@@ -17,7 +17,8 @@
  *             Rejections are taken directly (the safe direction). Applies reversibly and
  *             self-gates to once per local day, like the other coach steps. Cases the model
  *             cannot verify (missing thread / unreadable / thread too long to cover in full)
- *             are LEFT in the queue for the owner — never auto-approved.
+ *             are auto-REJECTED (safe: never enters the DB; reversible) — no case is ever left
+ *             waiting for a human, because there is no human in the loop.
  *   apply   — Read a decisions JSONL, back up current live state, then mirror review-cases:
  *             gearbrain_cases {status, review_reason, reviewed_at} + resolve the queue row.
  *             CAS-guarded on status='pending' so a case decided meanwhile is never clobbered.
@@ -247,14 +248,16 @@ async function judgeOne(load, q) {
     thread_chars: threadText.length,
   };
   if (threadText.trim().length < MIN_THREAD_CHARS) {
-    return { ...base, verdict: null, needs_human: true, reason_cs: 'Chybí text vlákna — nutná ruční kontrola.', confidence: 'low' };
+    return { ...base, verdict: 'reject', reason_code: 'other', unverifiable: true, confidence: 'low',
+      reason_cs: 'Bez původního vlákna nelze automaticky ověřit — zamítnuto (vratné).' };
   }
   const caseObj = caseObjFrom(q, payload);
   const { text: windowed, coverageComplete } = windowFor(threadText, payload);
   const prompt = buildPrompt(windowed, caseObj);
   let v = parseVerdict(await runLlm('review-decide', prompt, { timeoutMs: LLM_TIMEOUT_MS, temperature: 0 }));
   if (v.parseFail) v = parseVerdict(await runLlm('review-decide', `${prompt}\n\nOutput ONLY the JSON object, nothing else.`, { timeoutMs: LLM_TIMEOUT_MS, temperature: 0 }));
-  if (v.parseFail) return { ...base, verdict: null, needs_human: true, reason_cs: 'Model nevrátil čitelný výsledek — nutná ruční kontrola.', confidence: 'low' };
+  if (v.parseFail) return { ...base, verdict: 'reject', reason_code: 'other', unverifiable: true, confidence: 'low',
+    reason_cs: 'Model nevrátil čitelný výsledek k ověření — zamítnuto (vratné).' };
   return {
     ...base, verdict: v.verdict, confidence: v.confidence, failed_clause: v.failedClause,
     reason_code: v.verdict === 'reject' ? v.reasonCode : null, reason_cs: v.reasonCs,
@@ -268,8 +271,8 @@ async function judgeOne(load, q) {
 async function doubleCheckApprove(load, q, dec) {
   const { payload, threadText } = load(q.case_local_id);
   if ((threadText || '').trim().length < MIN_THREAD_CHARS) {
-    return { ...dec, verdict: null, needs_human: true, double_check: 'no_thread',
-      reason_cs: 'Dvojitá kontrola: chybí text vlákna k ověření — ruční kontrola.' };
+    return { ...dec, verdict: 'reject', reason_code: 'other', unverifiable: true, double_check: 'no_thread',
+      reason_cs: 'Dvojitá kontrola: chybí text vlákna k ověření — zamítnuto (vratné).' };
   }
   const caseObj = caseObjFrom(q, payload);
   const { text: windowed } = windowFor(threadText, payload);
@@ -351,8 +354,8 @@ async function judgeLoop({ outPath, todo, concurrency, doubleCheck }) {
       // auto-approved and not worth a skeptic call.
       if (doubleCheck && dec.verdict === 'approve') {
         if (dec.coverage_complete === false) {
-          dec = { ...dec, verdict: null, needs_human: true, double_check: 'coverage',
-            reason_cs: 'Vlákno je příliš dlouhé na úplné ověření (možné pozdější vyjádření majitele) — ruční kontrola.' };
+          dec = { ...dec, verdict: 'reject', reason_code: 'other', unverifiable: true, double_check: 'coverage',
+            reason_cs: 'Vlákno je příliš dlouhé na úplné automatické ověření (možné pozdější vyjádření majitele) — zamítnuto (vratné).' };
         } else {
           dec = await doubleCheckApprove(load, row, dec);
         }

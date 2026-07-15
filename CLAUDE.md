@@ -9,6 +9,18 @@ AI-powered automotive diagnostic web app. React SPA + Supabase backend + Deno ed
 - Explain changes in **plain, non-technical language** (what it does, what to expect) — not code detail.
 - Confirm anything irreversible or user-facing (especially live deploys / merges to `main`, which auto-publish via Vercel) with the owner in plain terms before doing it.
 
+## Autonomous Crawl Agent (NO human in the loop)
+The owner will **not** monitor anything — no case-by-case review, no Desktop icons, no logs, no reports. The crawl agent (`scripts/agent/`) must therefore be fully self-running:
+- **Decide everything itself.** No case is ever left "for the human". When a case cannot be verified (missing thread, unreadable model output, thread too long to fully cover), the safe default is **reject** (it never enters the DB; everything is reversible). Approvals still get the independent double-check.
+- **Self-correct, don't just alarm.** Auditors act (reversibly quarantine bad cases / reopen wrongly-rejected ones), not merely warn.
+- **Freeze the judgment rulebook.** Never auto-rewrite the quality bar / judge prompts without ground truth — that is the one thing that could silently drift. Only safe, reversible tunings (e.g. forum priority) stay automatic.
+- **Everything reversible** (backups + revert), so any systemic error can be undone in bulk.
+
+### The operator inbox — the ONLY owner-facing channel
+`scripts/agent/operator-inbox.md` is the single place the agent surfaces the rare, recurring problems that genuinely need the owner's decision (maintained automatically; see `operator-inbox.mjs`).
+- **At the START of every session, Read `scripts/agent/operator-inbox.md`.** If it lists open issues, LEAD your first reply with them in plain Czech: the problem, your proposed fix, and a yes/no ask. If it's empty, briefly confirm everything is running.
+- The owner does not open this file or watch icons — **you** relay it in chat. This is how "tell me only when you need a decision" works.
+
 ## Before Every Push
 Pre-push hook runs automatically (ESLint + Vite build). Do NOT skip with `--no-verify`.
 

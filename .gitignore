@@ -32,6 +32,8 @@ scripts/agent/logs/
 scripts/agent/pause-until.txt
 scripts/agent/last-success.txt
 scripts/agent/first-run.txt
+scripts/agent/operator-inbox.json
+scripts/agent/operator-inbox.md
 tmp-chrome-profile*/
 .claude/worktrees/
 

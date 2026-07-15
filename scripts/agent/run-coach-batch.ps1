@@ -87,6 +87,16 @@ function Invoke-NodeStep { param([string]$NodeExe, [string]$Script, [string]$Log
   }
 }
 
+# Fire-and-forget call to the operator-inbox (the owner-facing "needs a decision" channel).
+# Best-effort: never fails the batch. Text/logic live in operator-inbox.mjs (Czech, UTF-8 safe).
+function Invoke-Inbox { param([string[]]$InboxArgs)
+  try {
+    $script = Join-Path $agentDir 'operator-inbox.mjs'
+    if (-not (Test-Path $script)) { return }
+    & $nodeExe $script @InboxArgs 1>$null 2>$null
+  } catch { }
+}
+
 $nodeExe = Resolve-NodeExe -RequestedNodePath $NodePath -RepoRoot $repoRoot
 $logRoot = if ($LogDir) { $LogDir } else { Join-Path $agentDir 'logs' }
 $null = New-Item -ItemType Directory -Path $logRoot -Force
@@ -123,6 +133,8 @@ Tento soubor zmizi sam, jakmile ranni davka zase dobehne cela.
 "@
       Set-Content -Path $coachDeadMarker -Value $deadText -Encoding utf8
       Write-LogLine -Path $logPath -Message ("ALARM: previous coach chain never finished (running-marker {0:N1}h old); desktop marker created." -f $ageHours)
+      # Owner-facing channel: surface the recurring "morning run doesn't finish" problem + fix.
+      Invoke-Inbox @('raise', '--key', 'coach-incomplete')
     }
   }
   Set-Content -Path $coachRunningFile -Value ((Get-Date).ToString('o')) -Encoding utf8
@@ -253,6 +265,12 @@ Tento soubor zmizi sam, jakmile bude dalsi denni kontrola pod prahem.
   }
 }
 
+# Owner-facing channel: reconcile the operator inbox with the auditors' signals (recall/precision
+# alerts + crawler heartbeat). Runs HERE — after the cheap auditors, before the heavy LLM steps —
+# so the inbox reflects today's checks even if a later heavy step is killed by the time limit.
+Invoke-Inbox @('sync')
+Write-LogLine -Path $logPath -Message "Operator inbox synced from signals."
+
 # Auto-review the DISPUTABLE queue (the cases triage could NOT clearly approve): the strong judge
 # decides each one from its thread, and every proposed APPROVAL is re-checked by an independent
 # skeptic before it enters the live DB — rejections are taken directly (the safe direction). This
@@ -296,6 +314,8 @@ Write-LogLine -Path $logPath -Message "END coach batch."
 # Clean finish → drop the running-marker and any "chain never finished" alarm.
 try {
   Remove-Item $coachRunningFile -Force -ErrorAction SilentlyContinue
+  # The chain finished → the "morning run doesn't finish" problem is resolved for now.
+  Invoke-Inbox @('clear', '--key', 'coach-incomplete')
   if ($desktopDir) {
     $coachDeadMarkerEnd = Join-Path $desktopDir 'DRIVECODEX-RANNI-KONTROLA-NEDOBEHLA-PRECTI-ME.txt'
     if (Test-Path $coachDeadMarkerEnd) {
