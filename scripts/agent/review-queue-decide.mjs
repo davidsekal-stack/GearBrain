@@ -1,24 +1,24 @@
 /**
- * review-queue-decide.mjs — decide the DISPUTABLE pending cases (assisted OR fully automatic).
+ * review-queue-decide.mjs — the crawl agent's decision engine (unified pass + manual tools).
  *
- * The intake triage (triage.mjs) auto-approves the clearly-good pending cases and leaves
- * the DISPUTABLE ones in crawl_review_queue. This tool decides that queue: for EACH open
- * queue case it re-reads the ORIGINAL thread from local agent.db and independently decides
- * APPROVE or REJECT against the shared QUALITY_BAR — anchored to the case's OWN author +
- * cited fault/resolution posts (the verify.mjs pattern), with the thread windowed by the
- * shared judge-context so the owner's (often LATE) confirmation is guaranteed to be visible.
+ * `auto` is the SINGLE nightly decision pass: it replaces the old triage(approve-clear / defer
+ * to queue) + separate review(decide the queue) split — both ran the strong model, so a hard
+ * case was judged by Sonnet TWICE. Now every PENDING case is judged ONCE from its ORIGINAL
+ * thread against the shared QUALITY_BAR — anchored to the case's OWN author + cited posts, with
+ * the thread windowed by judge-context so the owner's (often LATE) confirmation is visible — and
+ * every proposed APPROVAL is re-checked by an INDEPENDENT skeptic before it can enter the DB.
  *
  * Modes:
- *   judge   — READ-ONLY. Judge every open-queue case (resumable, checkpointed JSONL) + Czech
- *             Markdown report. Writes NOTHING to any DB.
- *   auto    — UNATTENDED daily pass (the scheduled morning step). Judge each case with the
- *             strong judge; then for every proposed APPROVAL run an INDEPENDENT skeptic that
- *             tries to REFUTE it — approve only if the skeptic upholds it (double-check).
- *             Rejections are taken directly (the safe direction). Applies reversibly and
- *             self-gates to once per local day, like the other coach steps. Cases the model
- *             cannot verify (missing thread / unreadable / thread too long to cover in full)
- *             are auto-REJECTED (safe: never enters the DB; reversible) — no case is ever left
- *             waiting for a human, because there is no human in the loop.
+ *   judge   — READ-ONLY. Judge the open review QUEUE only (ad-hoc queue inspection), checkpointed
+ *             JSONL + Czech Markdown report. Writes NOTHING to any DB.
+ *   auto    — UNATTENDED unified daily pass (the scheduled morning step). Sources ALL PENDING
+ *             cases (oldest-first, bounded by AUTO_REVIEW_MAX so a backlog drains over nights and
+ *             the run finishes inside the coach time limit). Judges each once; every APPROVAL is
+ *             double-checked by an independent skeptic (approve only if upheld); rejections are
+ *             taken directly (the safe direction). Cases the model cannot verify (missing thread /
+ *             unreadable / thread too long to cover in full) are auto-REJECTED — no case is ever
+ *             left waiting for a human, because there is no human in the loop. Applies reversibly,
+ *             resolves any open queue row for a decided case, self-gates to once per local day.
  *   apply   — Read a decisions JSONL, back up current live state, then mirror review-cases:
  *             gearbrain_cases {status, review_reason, reviewed_at} + resolve the queue row.
  *             CAS-guarded on status='pending' so a case decided meanwhile is never clobbered.
@@ -104,7 +104,7 @@ function buildPrompt(threadText, c) {
   const faultPosts = promptList((c.fault_post_numbers || []).map(String), 12);
   const resPosts = promptList((c.resolution_post_numbers || []).map(String), 12);
   const conf = c.confirmation_quote ? `\n  Claimed owner-confirmation quote: ${promptField(c.confirmation_quote, 300)} (post ${c.confirmation_post_number ?? '?'})` : '';
-  return `You are the final human reviewer for a repair case queued for approval into a live automotive-diagnostic database that non-technical users rely on. A cheap first-pass model already flagged this case as DISPUTABLE; decide the truth yourself by reading the ORIGINAL thread. A wrongly-APPROVED bad case corrupts real repair advice (worse than a wrongly-rejected one), but do NOT reject a genuinely good case either — approve it if, and only if, ALL of (a)-(e) are POSITIVELY supported by the thread.
+  return `You are the sole reviewer deciding whether an auto-extracted repair case belongs in a live automotive-diagnostic database that non-technical users rely on. There is no second human pass — decide the truth yourself by reading the ORIGINAL thread. A wrongly-APPROVED bad case corrupts real repair advice (worse than a wrongly-rejected one), but do NOT reject a genuinely good case either — approve it if, and only if, ALL of (a)-(e) are POSITIVELY supported by the thread.
 
 ${QUALITY_BAR}
 
@@ -342,6 +342,35 @@ async function collectQueue(outPath, { fresh, limit }) {
   return { todo, beforePending, stillPending: queue.length, done };
 }
 
+// The UNIFIED decision pass sources ALL pending cases (oldest-first), not just the disputable
+// queue — this single pass replaces the old triage(approve-clear / defer) + review(decide-defer)
+// split. A case that also has an open queue row is still just a pending case here; applyDecisions
+// resolves its queue row when the case is decided. Bounded by the cap so the backlog drains over
+// nights (like TRIAGE_MAX) and the run always finishes inside the coach time limit.
+async function collectPending(outPath, { fresh, limit }) {
+  const rows = [];
+  for (let offset = 0; ; offset += 500) {
+    const r = await fetchLiveCasesByStatus({ supabaseUrl: SUPABASE_URL, serviceKey: KEY, status: 'pending', limit: 500, offset, order: 'created_at.asc', select: 'local_id,vehicle_brand,vehicle_model,thread_url' });
+    if (!r.ok) { if (offset === 0) { console.error('Cannot read pending cases:', r.reason); process.exit(1); } break; }
+    for (const row of r.rows) rows.push({ case_local_id: row.local_id, vehicle_brand: row.vehicle_brand, vehicle_model: row.vehicle_model, thread_url: row.thread_url, clause: null, ai_note: null });
+    if (r.rows.length < 500) break;
+    if (limit > 0 && rows.length >= limit + 500) break; // enough to fill the cap after dedup
+  }
+  const totalPending = rows.length;
+
+  // Resume: skip already-decided ids from an existing --out file.
+  const done = new Set();
+  if (!fresh && existsSync(outPath)) {
+    for (const line of readFileSync(outPath, 'utf8').split('\n')) {
+      const t = line.trim(); if (!t) continue;
+      try { const o = JSON.parse(t); if (o.case_local_id) done.add(o.case_local_id); } catch {}
+    }
+  }
+  let todo = rows.filter(row => !done.has(row.case_local_id));
+  if (limit > 0) todo = todo.slice(0, limit);
+  return { todo, totalPending, done };
+}
+
 async function judgeLoop({ outPath, todo, concurrency, doubleCheck }) {
   const db = new DatabaseSync(DB_PATH, { readOnly: true });
   const load = makeLoader(db);
@@ -501,12 +530,13 @@ async function auto() {
     const outPath = join(LOG_DIR, `auto-review-${ts()}.jsonl`);
 
     // fresh: a brand-new run each morning (its own timestamped JSONL — no stale resume state).
-    const { todo, beforePending, stillPending } = await collectQueue(outPath, { fresh: true, limit });
-    const capNote = (limit > 0 && stillPending > todo.length) ? ` (cap ${limit}/run; ${stillPending - todo.length} left for next mornings)` : '';
-    console.log(`auto-review: open-queue=${beforePending}, still-pending=${stillPending}, to-decide=${todo.length}${capNote}, concurrency=${concurrency}${dryRun ? ' [DRY-RUN]' : ''}`);
-    console.log(`auto-review: judge=${process.env['AGENT_LLM_REVIEW-DECIDE']}, double-check=${process.env['AGENT_LLM_REVIEW-REFUTE']}, out=${outPath}`);
+    // Sources ALL pending cases (the unified decision pass), oldest-first, bounded by the cap.
+    const { todo, totalPending } = await collectPending(outPath, { fresh: true, limit });
+    const capNote = (limit > 0 && totalPending > todo.length) ? ` (cap ${limit}/run; ${totalPending - todo.length} zbývá na další rána)` : '';
+    console.log(`decision-pass: pending=${totalPending}, to-decide=${todo.length}${capNote}, concurrency=${concurrency}${dryRun ? ' [DRY-RUN]' : ''}`);
+    console.log(`decision-pass: judge=${process.env['AGENT_LLM_REVIEW-DECIDE']}, double-check=${process.env['AGENT_LLM_REVIEW-REFUTE']}, out=${outPath}`);
     if (todo.length === 0) {
-      console.log('auto-review: fronta prázdná — nic k rozhodnutí.');
+      console.log('decision-pass: nic pending k rozhodnutí.');
       if (!dryRun && !force) state.setMeta(META_KEY, today);
       return;
     }
@@ -520,12 +550,12 @@ async function auto() {
     const reject = decs.filter(d => d.verdict === 'reject');
     const human = decs.filter(d => !d.verdict);
     const flipped = decs.filter(d => d.double_check === 'refuted');
-    console.log(`auto-review: judge→ approve ${approve.length}, reject ${reject.length}, human ${human.length}; double-check flipped→reject ${flipped.length}`);
+    console.log(`decision-pass: judge→ approve ${approve.length}, reject ${reject.length}, human ${human.length}; double-check flipped→reject ${flipped.length}`);
 
-    if (dryRun) { console.log('auto-review: dry-run — nic nezapsáno do DB.'); return; }
+    if (dryRun) { console.log('decision-pass: dry-run — nic nezapsáno do DB.'); return; }
 
     const { done: applied, skips, backupPath } = await applyDecisions(decs, { dryRun: false });
-    console.log(`auto-review apply: approved ${applied.approved}, rejected ${applied.rejected}, skipped ${applied.skipped}, failed ${applied.failed}`);
+    console.log(`decision-pass apply: approved ${applied.approved}, rejected ${applied.rejected}, skipped ${applied.skipped}, failed ${applied.failed}`);
     for (const s of skips.slice(0, 20)) console.log('  ·', s);
     console.log(`backup → ${backupPath}\nrevert with: node --experimental-sqlite --env-file=scripts/agent/.env.local review-queue-decide.mjs revert --from ${backupPath}`);
 
@@ -533,7 +563,7 @@ async function auto() {
     state.recordMetric(today, 'autoreview_rejected', applied.rejected);
     state.recordMetric(today, 'autoreview_refuted', flipped.length);
     state.recordMetric(today, 'autoreview_needs_human', human.length);
-    state.log('info', `auto-review ${today}: approved ${applied.approved}, rejected ${applied.rejected}, refuted ${flipped.length}, human ${human.length}${stopped ? ' (STOPPED)' : ''}`, 'coach');
+    state.log('info', `decision-pass ${today}: approved ${applied.approved}, rejected ${applied.rejected}, refuted ${flipped.length}${stopped ? ' (STOPPED)' : ''}`, 'coach');
     // Claim the day only on a clean (non-aborted) run so a quota stop retries tomorrow.
     if (!stopped) state.setMeta(META_KEY, today);
   } finally {

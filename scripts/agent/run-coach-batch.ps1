@@ -191,14 +191,11 @@ Tento soubor zmizi sam, jakmile nocni crawl zase pobezi.
 #  4) alert-agent (reflects on the precision alarm + reversibly quarantines bad cases;
 #     runs BEFORE the Desktop marker mirror so its diagnosis shows up there; does its
 #     safety action with NO model so it survives a tight quota)
-#  5) auto-review queue (LLM-heavy: strong judge + independent double-check on approvals
-#     decides the DISPUTABLE cases — reversible, self-gated once/day, bounded by AUTO_REVIEW_MAX).
-#     Runs BEFORE triage: deciding the standing queue is the owner's priority, so it gets first
-#     claim on the fresh morning session.
-#  6) triage (LLM-heavy: auto-approves CLEAR pending cases, leaves only disputable for the
-#     auto-review pass) — takes the session budget remaining after auto-review.
-#  7) recalibrate-guarded (LLM-heavy: re-discovers + safely re-calibrates stuck forums)
-#     — runs LAST. 5), 6) and 7) are SKIPPED once any step signals a quota/auth stop (exit 3).
+#  5) decision pass (LLM-heavy: the UNIFIED triage+review — judges every pending case once and
+#     double-checks each approval with an independent skeptic; unverifiable → auto-reject).
+#     Reversible, self-gated once/day, bounded by AUTO_REVIEW_MAX. Replaces the old triage step.
+#  6) recalibrate-guarded (LLM-heavy: re-discovers + safely re-calibrates stuck forums)
+#     — runs LAST. 5) and 6) are SKIPPED once any step signals a quota/auth stop (exit 3).
 Invoke-NodeStep -NodeExe $nodeExe -Script (Join-Path $agentDir 'recall-watchdog.mjs')   -LogPath $logPath -RepoRoot $repoRoot -Label 'recall watchdog'
 Invoke-NodeStep -NodeExe $nodeExe -Script (Join-Path $agentDir 'daily-coach.mjs')        -LogPath $logPath -RepoRoot $repoRoot -Label 'daily coach'
 Invoke-NodeStep -NodeExe $nodeExe -Script (Join-Path $agentDir 'precision-auditor.mjs')  -LogPath $logPath -RepoRoot $repoRoot -Label 'precision auditor'
@@ -274,25 +271,16 @@ Write-LogLine -Path $logPath -Message "Operator inbox synced from signals."
 # Auto-review the DISPUTABLE queue (the cases triage could NOT clearly approve): the strong judge
 # decides each one from its thread, and every proposed APPROVAL is re-checked by an independent
 # skeptic before it enters the live DB — rejections are taken directly (the safe direction). This
-# replaces the by-hand queue review with a self-gated (once/day) reversible pass, bounded per run
-# by AUTO_REVIEW_MAX so a large backlog clears over several mornings (like TRIAGE_MAX). Runs BEFORE
-# triage — deciding the standing queue is the owner's stated priority, so it gets first claim on
-# the fresh morning session; triage then takes the remaining budget. LLM-heavy (sonnet, ×2 on
-# approvals) → skip on a prior quota/auth stop; signals exit 3 on its OWN stop (skips triage +
-# recalibration, which resume tomorrow).
+# UNIFIED decision pass (replaces the old triage + separate review split): judges EVERY pending
+# case once from its thread and double-checks every proposed approval with an independent skeptic
+# before it enters the live DB; unverifiable cases are auto-rejected (reversible). Bounded per run
+# by AUTO_REVIEW_MAX so a backlog drains over several mornings and the run finishes inside the
+# time limit. LLM-heavy (sonnet, ×2 on approvals) → skip on a prior quota/auth stop; signals exit 3
+# on its OWN stop (skips recalibration, which resumes tomorrow).
 if ($script:StoppingHit) {
-  Write-LogLine -Path $logPath -Message "Skipping auto-review of the disputable queue (a prior step signaled a quota/auth stop)."
+  Write-LogLine -Path $logPath -Message "Skipping decision pass (a prior step signaled a quota/auth stop)."
 } else {
-  Invoke-NodeStep -NodeExe $nodeExe -Script (Join-Path $agentDir 'review-queue-decide.mjs') -LogPath $logPath -RepoRoot $repoRoot -Label 'auto-review queue' -ScriptArgs @('auto')
-}
-
-# Intake triage: auto-approve the CLEAR pending cases, leave only disputable for the (now automated)
-# review pass above. LLM-heavy (up to TRIAGE_MAX judgements) → skip if an earlier step hit a
-# quota/auth stop (e.g. auto-review above consumed the session).
-if ($script:StoppingHit) {
-  Write-LogLine -Path $logPath -Message "Skipping intake triage (a prior step signaled a quota/auth stop)."
-} else {
-  Invoke-NodeStep -NodeExe $nodeExe -Script (Join-Path $agentDir 'triage.mjs') -LogPath $logPath -RepoRoot $repoRoot -Label 'intake triage'
+  Invoke-NodeStep -NodeExe $nodeExe -Script (Join-Path $agentDir 'review-queue-decide.mjs') -LogPath $logPath -RepoRoot $repoRoot -Label 'decision pass' -ScriptArgs @('auto')
 }
 
 # Un-rot calibration_failed forums (self-gates to once/~month, no LLM: applies

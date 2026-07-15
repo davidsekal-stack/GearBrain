@@ -118,8 +118,8 @@ export function render(inbox = loadInbox()) {
 const KNOWN = {
   'coach-incomplete': {
     title: 'Ranní kontrolní běh se nedokončuje',
-    detail: 'Noční „coach" dávka (kontroly + triáž + auto-review) nedoběhla do konce — narazila na 4hodinový časový limit úlohy, takže poslední kroky se neprovedly.',
-    fix: 'Sloučit triáž a auto-review do jednoho průchodu a zmenšit noční dávku (probírali jsme 14.–15. 7.). Zkrátí to běh tak, aby se do limitu vešel.',
+    detail: 'Noční „coach" dávka (kontroly + rozhodovací průchod) nedoběhla do konce — narazila na 4hodinový časový limit úlohy, takže poslední kroky se neprovedly.',
+    fix: 'Zmenšit noční dávku (AUTO_REVIEW_MAX v .env.local, teď 50), případně prodloužit limit úlohy — aby se rozhodovací průchod do 4 h vešel.',
   },
   'crawler-stale': {
     title: 'Noční crawl možná vůbec neběžel',
