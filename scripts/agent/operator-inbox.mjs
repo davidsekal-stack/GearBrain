@@ -136,7 +136,20 @@ const KNOWN = {
     detail: 'Precizní auditor našel mezi schválenými případy nějaké, které vypadají chybně.',
     fix: 'Projdu je, chybné vratně stáhnu a zpřísním tam, kde to uniklo.',
   },
+  'decision-backlog': {
+    title: 'Fronta na rozhodnutí roste – nestíhá se',
+    detail: 'Případů čekajících na rozhodnutí je hodně a dlouhodobě přibývá — denní rozhodovací průchod nestíhá tolik, kolik crawler za noc přinese.',
+    fix: 'Buď zvednout denní dávku (AUTO_REVIEW_MAX), ubrat noční sběr, nebo přesunout i extrakci na levný model / navýšit Claude tarif.',
+  },
 };
+
+/** Raise a KNOWN issue by key (text from the registry) — for programmatic callers (e.g. the
+ *  decision pass) that don't shell out to the CLI. */
+export function raiseKnown(key, now = new Date()) {
+  const k = KNOWN[key];
+  if (!k) throw new Error(`unknown issue key: ${key}`);
+  return raiseIssue({ key, ...k }, now);
+}
 
 /** Reconcile the inbox with the agent's own signal files (idempotent). Called at the end of the
  *  coach batch: a present alert file raises its issue, an absent one clears it. All text is Czech

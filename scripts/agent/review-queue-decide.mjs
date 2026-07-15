@@ -42,6 +42,7 @@ import { windowThread } from './judge-context.mjs';
 import { AgentState } from './state.mjs';
 import { fetchOpenReviewQueueRows, fetchLiveCasesByStatus, setLiveCaseStatusByLocalId } from './supabase-utils.mjs';
 import { isStoppingError } from './quota.mjs';
+import { raiseKnown, clearIssue } from './operator-inbox.mjs';
 
 // Independent strong judge (Claude Sonnet — a different vendor than the DeepSeek verifier, and
 // stronger than the haiku triage that flagged these as disputable in the first place). The
@@ -566,6 +567,10 @@ async function auto() {
     state.log('info', `decision-pass ${today}: approved ${applied.approved}, rejected ${applied.rejected}, refuted ${flipped.length}${stopped ? ' (STOPPED)' : ''}`, 'coach');
     // Claim the day only on a clean (non-aborted) run so a quota stop retries tomorrow.
     if (!stopped) state.setMeta(META_KEY, today);
+    // Owner-facing: if the overnight pending backlog stays large, the pass isn't keeping up with
+    // intake — surface it in the operator inbox (else clear it). Threshold well above steady state.
+    const BACKLOG_ALARM = intEnv('DECISION_BACKLOG_ALARM', 600);
+    try { if (totalPending > BACKLOG_ALARM) raiseKnown('decision-backlog'); else clearIssue('decision-backlog'); } catch {}
   } finally {
     state.close();
   }
