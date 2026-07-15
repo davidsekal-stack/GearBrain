@@ -8,12 +8,13 @@ param(
   # Night crawl window bounds (LOCAL time) — keep in sync with the trigger registered by
   # register-agent-task.ps1 (-Nightly). Used only to compute the orchestrator's
   # clean-stop deadline; runs started OUTSIDE the window get no deadline.
-  # Window = 17:00–02:00 local: chosen so the DeepSeek-billed step (verify.mjs) always runs
-  # in DeepSeek OFF-PEAK hours (peak = 01–04 & 06–10 UTC) in BOTH CET and CEST, AND entirely
-  # outside the owner's working hours 06:00–17:00. (17:00–02:00 local → 15:00–00:00 UTC in
-  # summer / 16:00–01:00 UTC in winter, both clear of the peak bands.)
+  # Window = 17:00–24:00 local (shortened 2026-07-15 to cut token spend): the DeepSeek-billed step
+  # (verify.mjs) still runs in DeepSeek OFF-PEAK hours (peak = 01–04 & 06–10 UTC) in BOTH CET and
+  # CEST, AND entirely outside the owner's working hours 06:00–17:00. (17:00–24:00 local → 15:00–
+  # 22:00 UTC in summer / 16:00–23:00 UTC in winter, both clear of the peak bands.)
+  # NightEndHour=0 means the window ends at midnight and does NOT wrap into the next day.
   [int]$NightStartHour = 17,
-  [int]$NightEndHour = 2,
+  [int]$NightEndHour = 0,
   [int]$DeadlineMarginMinutes = 10
 )
 
