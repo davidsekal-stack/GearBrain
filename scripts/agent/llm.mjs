@@ -23,13 +23,12 @@ import { assertDeepSeekNotQuotaError } from './quota.mjs';
 import { OFFLINE_DEEPSEEK_MODEL, DEEPSEEK_CHAT_URL } from './deepseek.mjs';
 
 const DEFAULT_ROUTES = {
-  // 2026-07-15: classify moved off Claude (was claude:haiku) onto DeepSeek to free the Claude
-  // subscription for the strong-model decision pass (review-queue-decide.mjs). Classify is a coarse
-  // "does this thread hold ≥1 resolved case" gate — an A/B on 14 real threads showed DeepSeek ≈
-  // haiku (11/14 agree, 10 vs 11 approved), so yield is preserved. Runs in the 17:00–24:00 crawl
-  // window = DeepSeek off-peak. (The nuanced per-case APPROVE/REJECT judgment stays on Claude —
-  // DeepSeek was far too strict there.)
-  classify: `deepseek:${OFFLINE_DEEPSEEK_MODEL}`,
+  // classify stays on Claude haiku. (2026-07-15: tried moving it to DeepSeek to free Claude budget;
+  // a 14-thread A/B looked fine but a 70-thread A/B showed DeepSeek approves only 61% of what haiku
+  // does — ~40% over-rejection on the owner-confirmation nuance, same weakness it shows as a judge.
+  // A false reject at CLASSIFY is unrecoverable (thread discarded), so this would silently gut yield.
+  // Do NOT move classify to DeepSeek without re-validating on a large sample vs a strong reference.)
+  classify: 'claude:haiku',
   extract: 'claude:sonnet',
   dedupe: 'claude:haiku', // cluster same-thread duplicate cases (dedup-thread-cases.mjs); low volume, small prompt
   verify: `deepseek:${OFFLINE_DEEPSEEK_MODEL}`,

@@ -567,9 +567,11 @@ async function auto() {
     state.log('info', `decision-pass ${today}: approved ${applied.approved}, rejected ${applied.rejected}, refuted ${flipped.length}${stopped ? ' (STOPPED)' : ''}`, 'coach');
     // Claim the day only on a clean (non-aborted) run so a quota stop retries tomorrow.
     if (!stopped) state.setMeta(META_KEY, today);
-    // Owner-facing: if the overnight pending backlog stays large, the pass isn't keeping up with
-    // intake — surface it in the operator inbox (else clear it). Threshold well above steady state.
-    const BACKLOG_ALARM = intEnv('DECISION_BACKLOG_ALARM', 600);
+    // Owner-facing: if the overnight pending backlog RUNS AWAY, the pass isn't keeping up with
+    // intake — surface it in the operator inbox (else clear it). Threshold is set well above the
+    // current ~500 backlog + normal intake so it fires only on genuine multi-night growth, not on
+    // the pre-existing backlog being worked down.
+    const BACKLOG_ALARM = intEnv('DECISION_BACKLOG_ALARM', 900);
     try { if (totalPending > BACKLOG_ALARM) raiseKnown('decision-backlog'); else clearIssue('decision-backlog'); } catch {}
   } finally {
     state.close();

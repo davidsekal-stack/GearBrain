@@ -9,9 +9,7 @@ import {
 } from '../scripts/agent/quota.mjs';
 
 function testDefaultRoutes() {
-  // classify moved to DeepSeek 2026-07-15 (frees Claude budget for the strong decision pass;
-  // A/B-validated ≈ haiku). The nuanced extract/decision judgment stays on Claude.
-  assert.deepEqual(resolveRoute('classify', {}), { provider: 'deepseek', model: 'deepseek-v4-flash' });
+  assert.deepEqual(resolveRoute('classify', {}), { provider: 'claude', model: 'haiku' });
   assert.deepEqual(resolveRoute('extract', {}), { provider: 'claude', model: 'sonnet' });
   assert.deepEqual(resolveRoute('verify', {}), { provider: 'deepseek', model: 'deepseek-v4-flash' });
   assert.deepEqual(resolveRoute('calibrate', {}), { provider: 'claude', model: 'sonnet' });
